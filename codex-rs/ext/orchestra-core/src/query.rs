@@ -567,29 +567,30 @@ impl ExecutionQueryService {
             .into_iter()
             .find(|(relative, _)| evidence_id(relative) == requested_evidence_id)
             .ok_or(ExecutionQueryError::NotFound)?;
-        let metadata = fs::metadata(&path).map_err(storage_error)?;
         let kind = evidence_kind(&path);
         let provenance = evidence_provenance(&path);
         let name = evidence_name(&relative, self.limits.max_identity_bytes)?;
-        let digest = if metadata.len() <= self.limits.max_evidence_hash_bytes {
-            Some(sha256(&fs::read(&path).map_err(storage_error)?))
+        let bytes = fs::read(&path).map_err(storage_error)?;
+        let content_bytes = u64::try_from(bytes.len())
+            .map_err(|_| ExecutionQueryError::Storage("evidence length exceeds u64".into()))?;
+        let digest = if content_bytes <= self.limits.max_evidence_hash_bytes {
+            Some(sha256(&bytes))
         } else {
             None
         };
-        if metadata.len() > self.limits.max_evidence_content_bytes {
+        if content_bytes > self.limits.max_evidence_content_bytes {
             return Ok(EvidenceContentProjection {
                 evidence_id: requested_evidence_id.into(),
                 name,
                 kind,
                 provenance,
                 availability: EvidenceAvailability::ContentTooLarge,
-                bytes: metadata.len(),
+                bytes: content_bytes,
                 sha256: digest,
                 media_type: evidence_media_type(&path).into(),
                 content: None,
             });
         }
-        let bytes = fs::read(&path).map_err(storage_error)?;
         let content = match String::from_utf8(bytes) {
             Ok(content) => content,
             Err(_) => {
@@ -599,7 +600,7 @@ impl ExecutionQueryService {
                     kind,
                     provenance,
                     availability: EvidenceAvailability::Malformed,
-                    bytes: metadata.len(),
+                    bytes: content_bytes,
                     sha256: digest,
                     media_type: evidence_media_type(&path).into(),
                     content: None,
@@ -612,7 +613,7 @@ impl ExecutionQueryService {
             kind,
             provenance,
             availability: EvidenceAvailability::Available,
-            bytes: metadata.len(),
+            bytes: content_bytes,
             sha256: digest,
             media_type: evidence_media_type(&path).into(),
             content: Some(content),
@@ -1156,6 +1157,7 @@ mod tests {
         .unwrap();
         fs::write(root.join("evidence/checks/failed-2.json"), b"check").unwrap();
         fs::write(root.join("evidence/changes/done-1.patch"), b"patch").unwrap();
+        fs::write(root.join("evidence/other/empty.txt"), b"").unwrap();
         fs::write(root.join("evidence/other/malformed.bin"), [0xff, 0xfe]).unwrap();
     }
 
@@ -1302,9 +1304,30 @@ mod tests {
         };
         assert_eq!(content.name, "failed-2.json");
         assert_eq!(content.content.as_deref(), Some("check"));
+        assert_eq!(content.bytes, 5);
         assert_eq!(content.media_type, "application/json");
         assert_eq!(content.sha256.as_deref(), Some(sha256(b"check").as_str()));
         assert!(!serde_json::to_string(&content).unwrap().contains("checks/"));
+
+        let empty = service
+            .query(
+                repository.path(),
+                "task-1",
+                "run-1",
+                ExecutionSelector::EvidenceContent {
+                    evidence_id: evidence_id("other/empty.txt"),
+                },
+                ExecutionQueryBudget::default(),
+            )
+            .await
+            .unwrap();
+        let ExecutionQueryResult::EvidenceContent(empty) = empty else {
+            panic!("expected empty evidence projection");
+        };
+        assert_eq!(empty.availability, EvidenceAvailability::Available);
+        assert_eq!(empty.content.as_deref(), Some(""));
+        assert_eq!(empty.bytes, 0);
+        assert_eq!(empty.sha256.as_deref(), Some(sha256(b"").as_str()));
 
         let malformed = service
             .query(
