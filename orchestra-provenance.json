@@ -11,9 +11,9 @@
   },
   "orchestraCore": {
     "repository": "https://github.com/edgefloor/codex-orchestra.git",
-    "revision": "eaab5f864442e5f83b8158cd12596125591cbfdc",
+    "revision": "4a97ef524ae3bf45327545c9031d2c17536101f6",
     "sourcePath": "crates/orchestra-core",
-    "sourceTree": "62b3b83cb45e0ca0ba501a0497e0a65b6314d57e",
+    "sourceTree": "63ee3334e26fed05ac9e3c2edde09de8bc14f176",
     "snapshotPath": "codex-rs/ext/orchestra-core",
     "snapshotTransform": "cargo fmt --config imports_granularity=Item",
     "files": {
@@ -30,7 +30,7 @@
       "src/lib.rs": "2bcd83c31879f0e8d3de5fe24f723f7cbca7aae59fd6fc669292ce64564ff7a8",
       "src/linear.rs": "0b1d5dc943a135f4fc0e94274080a1ad06eac3dc69355c57baf248bb1cd010a9",
       "src/plan.rs": "5eccaee0d3d4db01ca200788425992f0b0f63c53b148a6e228a45ec98f2feb2b",
-      "src/query.rs": "849c2acda8650407ca6a62f174cefbcbcbe20fe4929f93b098c42e427ce1c92f",
+      "src/query.rs": "dffb0863c7a8fb2f6955c67db5bb0381d9c21163d39bc0be190fb7832ac06e15",
       "src/runtime.rs": "f6461b8a4906e646aaca71c5f8c986626ebdc7f9df77d2a46a9a34604e2ea8f8",
       "src/skills.rs": "4083c40ebe87dfe989d4d46efe4b23c92c315fce6fc4b63e405130f0f4f290f5",
       "src/state.rs": "fa8c4b1d007e30fdf37eb9e9da232baf8d5e6b656587ff0f1fe32a407bcc02be",
