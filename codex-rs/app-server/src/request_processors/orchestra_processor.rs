@@ -9,6 +9,9 @@ use codex_app_server_protocol::AutomationReconcileParams;
 use codex_app_server_protocol::AutomationRunFixtureParams;
 use codex_app_server_protocol::AutomationRunParams;
 use codex_app_server_protocol::AutomationRunResponse;
+use codex_app_server_protocol::AutomationStartParams;
+use codex_app_server_protocol::AutomationSteerIssueParams;
+use codex_app_server_protocol::AutomationSteerIssueResponse;
 use codex_app_server_protocol::AutomationValidateParams;
 use codex_app_server_protocol::AutomationValidateResponse;
 use codex_app_server_protocol::OrchestraInvokeParams;
@@ -111,6 +114,38 @@ impl OrchestraRequestProcessor {
             .await
             .map(|run| AutomationRunResponse {
                 run: project_automation_run(run),
+            })
+            .map_err(orchestra_error)
+    }
+
+    pub(crate) async fn start_automation(
+        &self,
+        params: AutomationStartParams,
+    ) -> Result<AutomationRunResponse, JSONRPCErrorError> {
+        self.service
+            .start_automation(&params.thread_id, &params.profile_path)
+            .await
+            .map(|run| AutomationRunResponse {
+                run: project_automation_run(run),
+            })
+            .map_err(orchestra_error)
+    }
+
+    pub(crate) async fn steer_automation_issue(
+        &self,
+        params: AutomationSteerIssueParams,
+    ) -> Result<AutomationSteerIssueResponse, JSONRPCErrorError> {
+        self.service
+            .steer_automation_issue(
+                &params.thread_id,
+                &params.run_id,
+                &params.claim_id,
+                &params.input,
+            )
+            .await
+            .map(|(run, receipt)| AutomationSteerIssueResponse {
+                run: project_automation_run(run),
+                receipt: project_automation_steering_receipt(receipt),
             })
             .map_err(orchestra_error)
     }
@@ -633,6 +668,11 @@ fn project_automation_run(
                         failure: receipt.failure.map(automation_bounded_text),
                     })
                     .collect(),
+                latest_steering_receipt: claim
+                    .steering_receipts
+                    .into_iter()
+                    .max_by_key(|receipt| receipt.sequence)
+                    .map(project_automation_steering_receipt),
                 hook_receipts: claim
                     .hook_receipts
                     .into_iter()
@@ -694,6 +734,31 @@ fn project_automation_run(
         queue_preview_truncated: queue_total as usize > queue_preview.len(),
         queue_preview,
         next_action: automation_bounded_text(checkpoint.next_action),
+    }
+}
+
+fn project_automation_steering_receipt(
+    receipt: core::AutomationSteeringReceipt,
+) -> protocol::AutomationSteeringReceipt {
+    protocol::AutomationSteeringReceipt {
+        sequence: receipt.sequence,
+        submitted_at_ms: receipt.submitted_at_ms,
+        initiator_thread_id: receipt.initiator_thread_id,
+        target_thread_id: receipt.target_thread_id,
+        authority: receipt.authority,
+        input_sha256: receipt.input_sha256,
+        input_preview: receipt.input_preview,
+        status: match receipt.status {
+            core::AutomationSteeringStatus::Submitted => {
+                protocol::AutomationSteeringStatus::Submitted
+            }
+            core::AutomationSteeringStatus::Delivered => {
+                protocol::AutomationSteeringStatus::Delivered
+            }
+            core::AutomationSteeringStatus::Failed => protocol::AutomationSteeringStatus::Failed,
+        },
+        provider_receipt: receipt.provider_receipt,
+        failure: receipt.failure,
     }
 }
 
@@ -1584,6 +1649,40 @@ Implement {{ issue.identifier }}: {{ issue.title }}
                     .unwrap();
             })
             .unwrap();
+        let first_steering = store
+            .prepare_issue_steering(
+                &mut root,
+                &claim_id,
+                "automation-task-42",
+                "FIRST_STEERING_MUST_NOT_REACH_THE_BOUNDED_PROJECTION",
+                40,
+            )
+            .unwrap();
+        store
+            .complete_issue_steering(
+                &mut root,
+                &claim_id,
+                first_steering.sequence,
+                Ok("submission-1"),
+            )
+            .unwrap();
+        let latest_steering = store
+            .prepare_issue_steering(
+                &mut root,
+                &claim_id,
+                "automation-task-42",
+                "Focus on the recovery test.",
+                42,
+            )
+            .unwrap();
+        store
+            .complete_issue_steering(
+                &mut root,
+                &claim_id,
+                latest_steering.sequence,
+                Ok("submission-2"),
+            )
+            .unwrap();
 
         let workflow = OrchestraRuntime::new(AcceptanceHost)
             .run_with_inputs(
@@ -1649,9 +1748,14 @@ Implement {{ issue.identifier }}: {{ issue.title }}
             claim.effects[0].provider_receipt.as_deref(),
             Some("linear-comment-42")
         );
+        let steering = claim.latest_steering_receipt.as_ref().unwrap();
+        assert_eq!(steering.sequence, 2);
+        assert_eq!(steering.input_preview, "Focus on the recovery test.");
+        assert_eq!(steering.provider_receipt.as_deref(), Some("submission-2"));
         assert!(claim.worktree.contains("orc-42"));
         let desktop_payload = serde_json::to_string(&projection).unwrap();
         assert!(!desktop_payload.contains(RAW_CHILD_DETAIL));
+        assert!(!desktop_payload.contains("FIRST_STEERING_MUST_NOT_REACH"));
         assert!(!desktop_payload.contains("tracker_comment"));
     }
 }

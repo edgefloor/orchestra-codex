@@ -40,6 +40,7 @@ use codex_orchestra_core::AutomationRootStatus;
 use codex_orchestra_core::AutomationRunStart;
 use codex_orchestra_core::AutomationRunStore;
 use codex_orchestra_core::AutomationSecretKind;
+use codex_orchestra_core::AutomationSteeringReceipt;
 use codex_orchestra_core::AutomationTrackerCommentRequest;
 use codex_orchestra_core::AutomationTrackerPullRequestLinkRequest;
 use codex_orchestra_core::AutomationTrackerTransitionRequest;
@@ -129,6 +130,12 @@ pub struct AutomationLinearRead {
     pub has_next_page: bool,
     pub end_cursor: Option<String>,
     pub next_action: String,
+}
+
+#[derive(Clone, Copy)]
+enum AutomationTrackerBackend {
+    Fixture,
+    Live,
 }
 
 const LINEAR_ISSUE_FIELDS: &str = r#"
@@ -253,6 +260,14 @@ impl CodexHost {
             .await
             .map_err(|error| error.to_string())?;
         Ok(thread.orchestra_control().await)
+    }
+
+    async fn send_input(&self, handle: &AgentHandle, input: String) -> Result<String, String> {
+        self.control(&handle.parent_thread_id)
+            .await?
+            .send_input(&native_handle(handle)?, input)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -1102,6 +1117,127 @@ impl OrchestraService {
         Ok(())
     }
 
+    pub async fn start_automation(
+        &self,
+        parent_thread_id: &str,
+        profile_path: &str,
+    ) -> Result<AutomationRootCheckpoint, String> {
+        let preview_issue = AutomationIssue {
+            id: "production-start".into(),
+            identifier: "PRODUCTION-START".into(),
+            title: "Production Automation start".into(),
+            description: None,
+            priority: None,
+            state: "live".into(),
+            branch_name: None,
+            url: None,
+            labels: Vec::new(),
+            blocked_by: Vec::new(),
+            created_at: None,
+            updated_at: None,
+        };
+        let validation = self
+            .validate_automation(parent_thread_id, profile_path, preview_issue, None)
+            .await?;
+        if !validation.valid {
+            return Err(format!(
+                "Automation profile is invalid: {}",
+                validation
+                    .diagnostics
+                    .iter()
+                    .filter(|diagnostic| {
+                        diagnostic.severity
+                            == codex_orchestra_core::AutomationValidationSeverity::Error
+                    })
+                    .map(|diagnostic| format!("{}: {}", diagnostic.path, diagnostic.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        let profile = validation
+            .profile
+            .ok_or("valid Automation profile is missing its canonical snapshot")?;
+        let profile_digest = validation
+            .profile_digest
+            .ok_or("valid Automation profile is missing its digest")?;
+        let intake = self
+            .read_linear_automation_with_profile(
+                &profile,
+                AutomationLinearReadKind::Candidates,
+                None,
+                Some(50),
+                None,
+            )
+            .await?;
+        if intake.status == AutomationLinearReadStatus::Skipped {
+            return Err(
+                "Production Automation start requires the configured live Linear credential".into(),
+            );
+        }
+        let repository = self.repository(parent_thread_id).await?;
+        let source_revision =
+            repository_revision(&repository).map_err(|error| error.to_string())?;
+        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
+            repository: &repository,
+            owner_thread_id: parent_thread_id,
+            source_revision: &source_revision,
+            profile: &profile,
+            profile_digest: &profile_digest,
+        })
+        .map_err(|error| error.to_string())?;
+        self.automation_shutdown.track(&repository, &root.run_id);
+        if root.status == AutomationRootStatus::Suspended {
+            root = self
+                .reconcile_automation(parent_thread_id, &root.run_id, profile_path, true)
+                .await?;
+        }
+        if profile_digest != root.profile_digest
+            && root.profile_revision.pending_digest.as_deref() != Some(&profile_digest)
+        {
+            store
+                .stage_profile_revision(&mut root, &profile, &profile_digest)
+                .map_err(|error| error.to_string())?;
+        }
+        let pending = intake
+            .issues
+            .into_iter()
+            .filter(|issue| !root.claims.values().any(|claim| claim.issue_id == issue.id))
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            root.next_action = if intake.has_next_page {
+                "request the next bounded Linear candidate page".into()
+            } else {
+                "wait for an eligible Linear issue".into()
+            };
+            store.save(&mut root).map_err(|error| error.to_string())?;
+            return Ok(root);
+        }
+
+        let service = self.clone();
+        let parent_thread_id = parent_thread_id.to_owned();
+        let profile_path = profile_path.to_owned();
+        tokio::spawn(async move {
+            for issue in pending {
+                if let Err(error) = service
+                    .run_automation_fixture_inner(
+                        &parent_thread_id,
+                        &profile_path,
+                        issue,
+                        None,
+                        AutomationTrackerBackend::Live,
+                        None,
+                    )
+                    .await
+                {
+                    eprintln!("Production Automation issue execution failed: {error}");
+                }
+            }
+        });
+        root.next_action = "dispatch eligible live Linear issues".into();
+        store.save(&mut root).map_err(|error| error.to_string())?;
+        Ok(root)
+    }
+
     pub async fn run_automation_fixture(
         &self,
         parent_thread_id: &str,
@@ -1114,6 +1250,7 @@ impl OrchestraService {
             profile_path,
             fixture_issue,
             attempt,
+            AutomationTrackerBackend::Fixture,
             None,
         )
         .await
@@ -1139,6 +1276,7 @@ impl OrchestraService {
                     &profile_path,
                     fixture_issue,
                     attempt,
+                    AutomationTrackerBackend::Fixture,
                     Some(Arc::clone(&background_started)),
                 )
                 .await;
@@ -1163,6 +1301,7 @@ impl OrchestraService {
         profile_path: &str,
         fixture_issue: AutomationIssue,
         attempt: Option<u32>,
+        tracker_backend: AutomationTrackerBackend,
         started: Option<AutomationStartSignal>,
     ) -> Result<AutomationRootCheckpoint, String> {
         let attempt = attempt.unwrap_or(1);
@@ -1627,43 +1766,59 @@ impl OrchestraService {
         let mut effect_statuses = Vec::new();
         if matches!(&outcome, RunOutcome::Completed(_)) {
             for effect in &execution_profile.orchestra.effects {
-                let receipt = match effect {
-                    AutomationEffect::TrackerComment => {
-                        let body = extract_tracker_comment(workflow)?;
-                        store.resolve_tracker_comment(
-                            &mut root,
-                            &claim_id,
-                            &execution_profile,
-                            &body,
-                            AutomationGatePolicy::AutoAccept,
-                            |request| execute_fixture_tracker_comment(&repository, request),
-                        )
+                let receipt = match tracker_backend {
+                    AutomationTrackerBackend::Fixture => match effect {
+                        AutomationEffect::TrackerComment => {
+                            let body = extract_tracker_comment(workflow)?;
+                            store.resolve_tracker_comment(
+                                &mut root,
+                                &claim_id,
+                                &execution_profile,
+                                &body,
+                                AutomationGatePolicy::AutoAccept,
+                                |request| execute_fixture_tracker_comment(&repository, request),
+                            )
+                        }
+                        AutomationEffect::TrackerTransition => {
+                            let target_state = extract_tracker_transition(workflow)?;
+                            store.resolve_tracker_transition(
+                                &mut root,
+                                &claim_id,
+                                &execution_profile,
+                                &fixture_tracker_state,
+                                &target_state,
+                                AutomationGatePolicy::AutoAccept,
+                                |request| execute_fixture_tracker_transition(&repository, request),
+                            )
+                        }
+                        AutomationEffect::TrackerLinkPullRequest => {
+                            let pull_request_url = extract_tracker_pull_request(workflow)?;
+                            store.resolve_tracker_pull_request_link(
+                                &mut root,
+                                &claim_id,
+                                &execution_profile,
+                                &pull_request_url,
+                                AutomationGatePolicy::AutoAccept,
+                                |request| {
+                                    execute_fixture_tracker_pull_request(&repository, request)
+                                },
+                            )
+                        }
                     }
-                    AutomationEffect::TrackerTransition => {
-                        let target_state = extract_tracker_transition(workflow)?;
-                        store.resolve_tracker_transition(
+                    .map_err(|error| error.to_string())?,
+                    AutomationTrackerBackend::Live => {
+                        resolve_live_tracker_effect(
+                            &store,
                             &mut root,
                             &claim_id,
                             &execution_profile,
                             &fixture_tracker_state,
-                            &target_state,
-                            AutomationGatePolicy::AutoAccept,
-                            |request| execute_fixture_tracker_transition(&repository, request),
+                            effect,
+                            workflow,
                         )
+                        .await?
                     }
-                    AutomationEffect::TrackerLinkPullRequest => {
-                        let pull_request_url = extract_tracker_pull_request(workflow)?;
-                        store.resolve_tracker_pull_request_link(
-                            &mut root,
-                            &claim_id,
-                            &execution_profile,
-                            &pull_request_url,
-                            AutomationGatePolicy::AutoAccept,
-                            |request| execute_fixture_tracker_pull_request(&repository, request),
-                        )
-                    }
-                }
-                .map_err(|error| error.to_string())?;
+                };
                 effect_statuses.push(receipt.status);
             }
         }
@@ -1826,6 +1981,49 @@ impl OrchestraService {
             }
         });
         Ok(root)
+    }
+
+    pub async fn steer_automation_issue(
+        &self,
+        parent_thread_id: &str,
+        run_id: &str,
+        claim_id: &str,
+        input: &str,
+    ) -> Result<(AutomationRootCheckpoint, AutomationSteeringReceipt), String> {
+        let repository = self.repository(parent_thread_id).await?;
+        let store =
+            AutomationRunStore::open(&repository, run_id).map_err(|error| error.to_string())?;
+        let mut root = store.load().map_err(|error| error.to_string())?;
+        authorize_automation_root(&root, parent_thread_id)?;
+        let issue_task = root
+            .claims
+            .get(claim_id)
+            .and_then(|claim| claim.issue_task.clone())
+            .ok_or_else(|| format!("Automation claim `{claim_id}` has no native Issue task"))?;
+        let submitted = store
+            .prepare_issue_steering(
+                &mut root,
+                claim_id,
+                parent_thread_id,
+                input,
+                unix_epoch_millis(),
+            )
+            .map_err(|error| error.to_string())?;
+        let delivery = self.host.send_input(&issue_task, input.trim().into()).await;
+        root = store.load().map_err(|error| error.to_string())?;
+        let receipt = match delivery {
+            Ok(provider_receipt) => store.complete_issue_steering(
+                &mut root,
+                claim_id,
+                submitted.sequence,
+                Ok(&provider_receipt),
+            ),
+            Err(error) => {
+                store.complete_issue_steering(&mut root, claim_id, submitted.sequence, Err(&error))
+            }
+        }
+        .map_err(|error| error.to_string())?;
+        Ok((root, receipt))
     }
 
     async fn finish_automation_issue_cancellation(
@@ -2474,6 +2672,10 @@ fn linear_transition_mutation() -> &'static str {
     "mutation OrchestraTransitionIssue($issueId: String!, $stateId: String!) { issueUpdate(id: $issueId, input: { stateId: $stateId }) { success issue { id state { name } } } }"
 }
 
+fn linear_comment_mutation() -> &'static str {
+    "mutation OrchestraCommentIssue($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success comment { id body } } }"
+}
+
 fn linear_pull_request_mutation() -> &'static str {
     "mutation OrchestraLinkPullRequest($issueId: String!, $url: String!) { attachmentCreate(input: { issueId: $issueId, url: $url, title: \"Pull request\" }) { success attachment { id url } } }"
 }
@@ -2578,6 +2780,44 @@ async fn execute_live_linear_transition(
         }
         Ok(_) => AutomationEffectExecution::Ambiguous {
             message: "Linear transition returned no matching durable state".into(),
+        },
+        Err(message) => AutomationEffectExecution::Ambiguous { message },
+    }
+}
+
+async fn execute_live_linear_comment(
+    profile: &AutomationProfile,
+    credential: &str,
+    request: &AutomationTrackerCommentRequest,
+) -> AutomationEffectExecution {
+    match execute_linear_read(
+        &profile.tracker.endpoint,
+        credential,
+        profile.codex.read_timeout_ms,
+        linear_comment_mutation().into(),
+        json!({"issueId": request.issue_id, "body": request.body}),
+    )
+    .await
+    {
+        Ok(value)
+            if value
+                .pointer("/data/commentCreate/success")
+                .and_then(Value::as_bool)
+                == Some(true)
+                && value
+                    .pointer("/data/commentCreate/comment/id")
+                    .and_then(Value::as_str)
+                    .is_some() =>
+        {
+            AutomationEffectExecution::Committed {
+                provider_receipt: format!(
+                    "linear-comment:{}:{}",
+                    request.issue_id, request.idempotency_key
+                ),
+            }
+        }
+        Ok(_) => AutomationEffectExecution::Ambiguous {
+            message: "Linear comment returned no matching durable comment".into(),
         },
         Err(message) => AutomationEffectExecution::Ambiguous { message },
     }
@@ -2783,6 +3023,80 @@ fn authorize_automation_root(
         Ok(())
     } else {
         Err("Automation Root Run does not belong to the requested task".into())
+    }
+}
+
+async fn resolve_live_tracker_effect(
+    store: &AutomationRunStore,
+    root: &mut AutomationRootCheckpoint,
+    claim_id: &str,
+    profile: &AutomationProfile,
+    refreshed_state: &str,
+    effect: &AutomationEffect,
+    workflow: &RunCheckpoint,
+) -> Result<AutomationEffectReceipt, String> {
+    let credential = linear_credential(profile)
+        .ok_or("referenced Linear credential is unavailable for a live mutation")?;
+    match effect {
+        AutomationEffect::TrackerComment => {
+            let body = extract_tracker_comment(workflow)?;
+            let (receipt, request) = store
+                .prepare_tracker_comment(
+                    root,
+                    claim_id,
+                    profile,
+                    &body,
+                    AutomationGatePolicy::AutoAccept,
+                )
+                .map_err(|error| error.to_string())?;
+            let Some(request) = request else {
+                return Ok(receipt);
+            };
+            let execution = execute_live_linear_comment(profile, &credential, &request).await;
+            store
+                .complete_tracker_effect(root, claim_id, &request.idempotency_key, execution)
+                .map_err(|error| error.to_string())
+        }
+        AutomationEffect::TrackerTransition => {
+            let target_state = extract_tracker_transition(workflow)?;
+            let (receipt, request) = store
+                .prepare_tracker_transition(
+                    root,
+                    claim_id,
+                    profile,
+                    refreshed_state,
+                    &target_state,
+                    AutomationGatePolicy::AutoAccept,
+                )
+                .map_err(|error| error.to_string())?;
+            let Some(request) = request else {
+                return Ok(receipt);
+            };
+            let execution = execute_live_linear_transition(profile, &credential, &request).await;
+            store
+                .complete_tracker_transition(root, claim_id, &request, execution)
+                .map_err(|error| error.to_string())
+        }
+        AutomationEffect::TrackerLinkPullRequest => {
+            let pull_request_url = extract_tracker_pull_request(workflow)?;
+            let (receipt, request) = store
+                .prepare_tracker_pull_request_link(
+                    root,
+                    claim_id,
+                    profile,
+                    &pull_request_url,
+                    AutomationGatePolicy::AutoAccept,
+                )
+                .map_err(|error| error.to_string())?;
+            let Some(request) = request else {
+                return Ok(receipt);
+            };
+            let execution =
+                execute_live_linear_pull_request_link(profile, &credential, &request).await;
+            store
+                .complete_tracker_effect(root, claim_id, &request.idempotency_key, execution)
+                .map_err(|error| error.to_string())
+        }
     }
 }
 

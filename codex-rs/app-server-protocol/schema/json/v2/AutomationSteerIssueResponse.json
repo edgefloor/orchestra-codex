@@ -659,13 +659,17 @@
     }
   },
   "properties": {
+    "receipt": {
+      "$ref": "#/definitions/AutomationSteeringReceipt"
+    },
     "run": {
       "$ref": "#/definitions/AutomationRunProjection"
     }
   },
   "required": [
+    "receipt",
     "run"
   ],
-  "title": "AutomationRunResponse",
+  "title": "AutomationSteerIssueResponse",
   "type": "object"
 }

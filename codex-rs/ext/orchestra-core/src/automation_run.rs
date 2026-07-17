@@ -221,10 +221,35 @@ pub struct AutomationIssueClaim {
     #[serde(default)]
     pub effects: Vec<AutomationEffectReceipt>,
     #[serde(default)]
+    pub steering_receipts: Vec<AutomationSteeringReceipt>,
+    #[serde(default)]
     pub hook_receipts: Vec<AutomationHookReceipt>,
     #[serde(default)]
     pub cleanup: AutomationCleanupState,
     pub next_action: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationSteeringStatus {
+    Submitted,
+    Delivered,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationSteeringReceipt {
+    pub sequence: u32,
+    pub submitted_at_ms: u64,
+    pub initiator_thread_id: String,
+    pub target_thread_id: String,
+    pub authority: String,
+    pub input_sha256: String,
+    pub input_preview: String,
+    pub status: AutomationSteeringStatus,
+    pub provider_receipt: Option<String>,
+    pub failure: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -436,6 +461,12 @@ pub enum AutomationRunError {
     InvalidTransition,
     #[error("tracker.link_pull_request requires a canonical HTTPS GitHub pull-request URL")]
     InvalidPullRequestLink,
+    #[error("Automation steering input must contain 1..=16384 bytes")]
+    InvalidSteeringInput,
+    #[error("Automation claim `{0}` has no native Issue task")]
+    MissingIssueTask(String),
+    #[error("Automation steering receipt `{sequence}` was not found for claim `{claim_id}`")]
+    MissingSteeringReceipt { claim_id: String, sequence: u32 },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -496,7 +527,10 @@ impl AutomationRunStore {
             let store = Self::open(&repository, &lease.run_id)?;
             let checkpoint = store.load()?;
             if lease.owner_thread_id == request.owner_thread_id
-                && checkpoint.status == AutomationRootStatus::Running
+                && matches!(
+                    checkpoint.status,
+                    AutomationRootStatus::Running | AutomationRootStatus::Suspended
+                )
             {
                 return Ok((store, checkpoint));
             }
@@ -752,6 +786,7 @@ impl AutomationRunStore {
                 workflow_run_id: None,
                 workflow_status: None,
                 effects: Vec::new(),
+                steering_receipts: Vec::new(),
                 hook_receipts: Vec::new(),
                 cleanup: AutomationCleanupState::default(),
                 next_action: "create persistent issue worktree and native Issue task".into(),
@@ -1503,6 +1538,93 @@ impl AutomationRunStore {
             body: body.into(),
         });
         Ok((prepared.receipt, request))
+    }
+
+    pub fn prepare_issue_steering(
+        &self,
+        checkpoint: &mut AutomationRootCheckpoint,
+        claim_id: &str,
+        initiator_thread_id: &str,
+        input: &str,
+        submitted_at_ms: u64,
+    ) -> Result<AutomationSteeringReceipt, AutomationRunError> {
+        let input = input.trim();
+        if input.is_empty() || input.len() > 16_384 {
+            return Err(AutomationRunError::InvalidSteeringInput);
+        }
+        let claim = checkpoint
+            .claims
+            .get_mut(claim_id)
+            .ok_or_else(|| AutomationRunError::MissingClaim(claim_id.into()))?;
+        if !matches!(
+            claim.status,
+            AutomationClaimStatus::Running | AutomationClaimStatus::Suspended
+        ) {
+            return Err(AutomationRunError::InactiveClaim(claim_id.into()));
+        }
+        let target_thread_id = claim
+            .issue_task
+            .as_ref()
+            .map(|task| task.thread_id.clone())
+            .ok_or_else(|| AutomationRunError::MissingIssueTask(claim_id.into()))?;
+        let sequence = claim.steering_receipts.len() as u32 + 1;
+        let receipt = AutomationSteeringReceipt {
+            sequence,
+            submitted_at_ms,
+            initiator_thread_id: initiator_thread_id.into(),
+            target_thread_id,
+            authority: "automation-claim-native-send-input-v1".into(),
+            input_sha256: sha256(input.as_bytes()),
+            input_preview: bounded_preview(input, 240),
+            status: AutomationSteeringStatus::Submitted,
+            provider_receipt: None,
+            failure: None,
+        };
+        claim.steering_receipts.push(receipt.clone());
+        claim.next_action = "deliver task-owned steering input to native Issue task".into();
+        checkpoint.next_action = claim.next_action.clone();
+        self.save(checkpoint)?;
+        Ok(receipt)
+    }
+
+    pub fn complete_issue_steering(
+        &self,
+        checkpoint: &mut AutomationRootCheckpoint,
+        claim_id: &str,
+        sequence: u32,
+        result: Result<&str, &str>,
+    ) -> Result<AutomationSteeringReceipt, AutomationRunError> {
+        let claim = checkpoint
+            .claims
+            .get_mut(claim_id)
+            .ok_or_else(|| AutomationRunError::MissingClaim(claim_id.into()))?;
+        let receipt = claim
+            .steering_receipts
+            .iter_mut()
+            .find(|receipt| receipt.sequence == sequence)
+            .ok_or_else(|| AutomationRunError::MissingSteeringReceipt {
+                claim_id: claim_id.into(),
+                sequence,
+            })?;
+        if receipt.status != AutomationSteeringStatus::Submitted {
+            return Ok(receipt.clone());
+        }
+        match result {
+            Ok(provider_receipt) => {
+                receipt.status = AutomationSteeringStatus::Delivered;
+                receipt.provider_receipt = Some(bounded_preview(provider_receipt, 512));
+                claim.next_action = "observe native Issue task after steering delivery".into();
+            }
+            Err(error) => {
+                receipt.status = AutomationSteeringStatus::Failed;
+                receipt.failure = Some(bounded_preview(error, 512));
+                claim.next_action = "review failed native Issue task steering delivery".into();
+            }
+        }
+        let receipt = receipt.clone();
+        checkpoint.next_action = claim.next_action.clone();
+        self.save(checkpoint)?;
+        Ok(receipt)
     }
 
     pub fn resolve_tracker_comment<F>(
@@ -2498,6 +2620,91 @@ mod tests {
         assert!(matches!(
             reopened.claim_fixture(&mut reopened_checkpoint.clone(), &issue(), 1),
             Err(AutomationRunError::DuplicateIssue(_))
+        ));
+
+        store.pause(&mut checkpoint, "provider restart").unwrap();
+        let (_, suspended_checkpoint) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-1",
+            source_revision: "different-is-ignored-for-resident-root",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        assert_eq!(suspended_checkpoint.run_id, checkpoint.run_id);
+        assert_eq!(suspended_checkpoint.status, AutomationRootStatus::Suspended);
+    }
+
+    #[test]
+    fn issue_steering_is_durable_claim_scoped_and_bounded() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let profile = profile(workspace.path());
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (store, mut checkpoint) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-steering",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let claim_id = store.claim_fixture(&mut checkpoint, &issue(), 1).unwrap();
+        store
+            .update_claim(&mut checkpoint, &claim_id, |claim| {
+                claim.status = AutomationClaimStatus::Running;
+                claim.issue_task = Some(AgentHandle {
+                    thread_id: "child-task".into(),
+                    task_path: "/root/automation_orc_33".into(),
+                    parent_thread_id: "task-steering".into(),
+                });
+            })
+            .unwrap();
+
+        let submitted = store
+            .prepare_issue_steering(
+                &mut checkpoint,
+                &claim_id,
+                "task-steering",
+                "Focus on the recovery test.",
+                42,
+            )
+            .unwrap();
+        assert_eq!(submitted.status, AutomationSteeringStatus::Submitted);
+        assert_eq!(submitted.target_thread_id, "child-task");
+        assert_eq!(submitted.input_preview, "Focus on the recovery test.");
+        assert_eq!(submitted.input_sha256.len(), 64);
+        assert_eq!(
+            store.load().unwrap().claims[&claim_id]
+                .steering_receipts
+                .len(),
+            1
+        );
+
+        let delivered = store
+            .complete_issue_steering(
+                &mut checkpoint,
+                &claim_id,
+                submitted.sequence,
+                Ok("queued on native child"),
+            )
+            .unwrap();
+        assert_eq!(delivered.status, AutomationSteeringStatus::Delivered);
+        assert_eq!(
+            delivered.provider_receipt.as_deref(),
+            Some("queued on native child")
+        );
+        let reloaded = store.load().unwrap();
+        let durable = reloaded.claims[&claim_id].steering_receipts.last().unwrap();
+        assert_eq!(durable.sequence, submitted.sequence);
+        assert_eq!(durable.status, AutomationSteeringStatus::Delivered);
+        assert_eq!(
+            durable.provider_receipt.as_deref(),
+            Some("queued on native child")
+        );
+        assert!(matches!(
+            store.prepare_issue_steering(&mut checkpoint, &claim_id, "task-steering", "", 43),
+            Err(AutomationRunError::InvalidSteeringInput)
         ));
     }
 

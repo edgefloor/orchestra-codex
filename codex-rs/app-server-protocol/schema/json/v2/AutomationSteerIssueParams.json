@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "claimId": {
+      "type": "string"
+    },
+    "input": {
+      "type": "string"
+    },
+    "runId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "claimId",
+    "input",
+    "runId",
+    "threadId"
+  ],
+  "title": "AutomationSteerIssueParams",
+  "type": "object"
+}

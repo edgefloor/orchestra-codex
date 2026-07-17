@@ -1279,11 +1279,21 @@ impl MessageProcessor {
                 .validate_automation(params)
                 .await
                 .map(|response| Some(response.into())),
+            ClientRequest::AutomationStart { params, .. } => self
+                .orchestra_processor
+                .start_automation(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::AutomationRunFixture { params, .. } => self
                 .orchestra_processor
                 .run_automation_fixture(params)
                 .await
                 .map(|response| Some(ClientResponsePayload::AutomationRunFixture(response))),
+            ClientRequest::AutomationSteerIssue { params, .. } => self
+                .orchestra_processor
+                .steer_automation_issue(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::AutomationLinearRead { params, .. } => self
                 .orchestra_processor
                 .read_linear_automation(params)

@@ -31,6 +31,14 @@ pub struct AutomationRunFixtureParams {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export_to = "v2/")]
+pub struct AutomationStartParams {
+    pub thread_id: String,
+    pub profile_path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
 pub struct AutomationLinearReadParams {
     pub thread_id: String,
     pub profile_path: String,
@@ -91,6 +99,16 @@ pub struct AutomationCancelIssueParams {
     pub thread_id: String,
     pub run_id: String,
     pub claim_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AutomationSteerIssueParams {
+    pub thread_id: String,
+    pub run_id: String,
+    pub claim_id: String,
+    pub input: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -169,6 +187,43 @@ pub struct AutomationValidateResponse {
 #[ts(export_to = "v2/")]
 pub struct AutomationRunResponse {
     pub run: AutomationRunProjection,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationSteerIssueResponse {
+    pub run: AutomationRunProjection,
+    pub receipt: AutomationSteeringReceipt,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationSteeringReceipt {
+    pub sequence: u32,
+    pub submitted_at_ms: u64,
+    pub initiator_thread_id: String,
+    pub target_thread_id: String,
+    pub authority: String,
+    pub input_sha256: String,
+    pub input_preview: String,
+    pub status: AutomationSteeringStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub provider_receipt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum AutomationSteeringStatus {
+    Submitted,
+    Delivered,
+    Failed,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -297,6 +352,9 @@ pub struct AutomationIssueClaimProjection {
     #[ts(optional)]
     pub workflow_status: Option<OrchestraRunStatus>,
     pub effects: Vec<AutomationEffectReceiptProjection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub latest_steering_receipt: Option<AutomationSteeringReceipt>,
     pub hook_receipts: Vec<AutomationHookReceiptProjection>,
     pub cleanup: AutomationCleanupProjection,
     pub next_action: OrchestraBoundedText,
@@ -709,6 +767,45 @@ mod automation_protocol_tests {
     }
 
     #[test]
+    fn automation_start_and_steering_are_closed_and_task_scoped() {
+        let start = serde_json::to_value(AutomationStartParams {
+            thread_id: "thread-1".into(),
+            profile_path: "WORKFLOW.md".into(),
+        })
+        .unwrap();
+        assert_eq!(start["threadId"], "thread-1");
+        assert!(start.get("repositoryRoot").is_none());
+        assert!(
+            serde_json::from_value::<AutomationStartParams>(serde_json::json!({
+                "threadId": "thread-1",
+                "profilePath": "WORKFLOW.md",
+                "repositoryRoot": "/tmp/foreign"
+            }))
+            .is_err()
+        );
+
+        let steer = serde_json::to_value(AutomationSteerIssueParams {
+            thread_id: "thread-1".into(),
+            run_id: "automation-1".into(),
+            claim_id: "claim-1".into(),
+            input: "Focus on recovery.".into(),
+        })
+        .unwrap();
+        assert_eq!(steer["claimId"], "claim-1");
+        assert!(steer.get("authority").is_none());
+        assert!(
+            serde_json::from_value::<AutomationSteerIssueParams>(serde_json::json!({
+                "threadId": "thread-1",
+                "runId": "automation-1",
+                "claimId": "claim-1",
+                "input": "Focus on recovery.",
+                "authority": "foreign"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn automation_optional_fields_are_omitted_instead_of_serialized_as_null() {
         let hooks = serde_json::to_value(AutomationHooksProfile {
             after_create: None,
@@ -731,6 +828,65 @@ mod automation_protocol_tests {
         })
         .unwrap();
         assert!(input.get("default").is_none());
+    }
+
+    #[test]
+    fn automation_claim_exposes_only_the_latest_durable_steering_receipt() {
+        let claim = |latest_steering_receipt| AutomationIssueClaimProjection {
+            claim_id: "claim-1".into(),
+            issue_id: "issue-1".into(),
+            issue_identifier: "ORC-32".into(),
+            issue_title: OrchestraBoundedText {
+                text: "Validate Automation".into(),
+                truncated: false,
+            },
+            tracker_state: "Todo".into(),
+            priority: None,
+            attempt: 1,
+            profile_digest: "profile-sha".into(),
+            profile_revision: 1,
+            status: AutomationClaimStatus::Running,
+            worktree: "/tmp/orc-32".into(),
+            source_revision: "abc123".into(),
+            issue_task: None,
+            workflow_run_id: None,
+            workflow_status: None,
+            effects: Vec::new(),
+            latest_steering_receipt,
+            hook_receipts: Vec::new(),
+            cleanup: AutomationCleanupProjection {
+                status: AutomationCleanupStatus::Retained,
+                attempts: 0,
+                last_failure: None,
+            },
+            next_action: OrchestraBoundedText {
+                text: "observe native Issue task".into(),
+                truncated: false,
+            },
+        };
+
+        let absent = serde_json::to_value(claim(None)).unwrap();
+        assert!(absent.get("latestSteeringReceipt").is_none());
+
+        let present = serde_json::to_value(claim(Some(AutomationSteeringReceipt {
+            sequence: 2,
+            submitted_at_ms: 42,
+            initiator_thread_id: "task-1".into(),
+            target_thread_id: "issue-task-1".into(),
+            authority: "automation-claim-native-send-input-v1".into(),
+            input_sha256: "input-sha".into(),
+            input_preview: "Focus on recovery.".into(),
+            status: AutomationSteeringStatus::Delivered,
+            provider_receipt: Some("submission-2".into()),
+            failure: None,
+        })))
+        .unwrap();
+        assert_eq!(present["latestSteeringReceipt"]["sequence"], 2);
+        assert_eq!(present["latestSteeringReceipt"]["status"], "delivered");
+        assert_eq!(
+            present["latestSteeringReceipt"]["providerReceipt"],
+            "submission-2"
+        );
     }
 
     #[test]

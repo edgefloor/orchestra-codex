@@ -72,6 +72,8 @@ pub use automation_run::AutomationRootStatus;
 pub use automation_run::AutomationRunError;
 pub use automation_run::AutomationRunStart;
 pub use automation_run::AutomationRunStore;
+pub use automation_run::AutomationSteeringReceipt;
+pub use automation_run::AutomationSteeringStatus;
 pub use automation_run::AutomationTrackerCommentRequest;
 pub use automation_run::AutomationTrackerPullRequestLinkRequest;
 pub use automation_run::AutomationTrackerTransitionRequest;

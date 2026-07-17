@@ -444,6 +444,46 @@
       ],
       "type": "object"
     },
+    "AutomationStartParams": {
+      "additionalProperties": false,
+      "properties": {
+        "profilePath": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profilePath",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutomationSteerIssueParams": {
+      "additionalProperties": false,
+      "properties": {
+        "claimId": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "claimId",
+        "input",
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "AutomationValidateParams": {
       "properties": {
         "attempt": {
@@ -5906,6 +5946,30 @@
         },
         "method": {
           "enum": [
+            "automation/start"
+          ],
+          "title": "Automation/startRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationStartParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/startRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
             "automation/runFixture"
           ],
           "title": "Automation/runFixtureRequestMethod",
@@ -6113,6 +6177,30 @@
         "params"
       ],
       "title": "Automation/cancelIssueRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/steerIssue"
+          ],
+          "title": "Automation/steerIssueRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationSteerIssueParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/steerIssueRequest",
       "type": "object"
     },
     {

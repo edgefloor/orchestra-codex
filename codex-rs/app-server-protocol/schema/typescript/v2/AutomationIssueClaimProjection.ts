@@ -5,8 +5,9 @@ import type { AutomationClaimStatus } from "./AutomationClaimStatus";
 import type { AutomationCleanupProjection } from "./AutomationCleanupProjection";
 import type { AutomationEffectReceiptProjection } from "./AutomationEffectReceiptProjection";
 import type { AutomationHookReceiptProjection } from "./AutomationHookReceiptProjection";
+import type { AutomationSteeringReceipt } from "./AutomationSteeringReceipt";
 import type { OrchestraAgentReference } from "./OrchestraAgentReference";
 import type { OrchestraBoundedText } from "./OrchestraBoundedText";
 import type { OrchestraRunStatus } from "./OrchestraRunStatus";
 
-export type AutomationIssueClaimProjection = { claimId: string, issueId: string, issueIdentifier: string, issueTitle: OrchestraBoundedText, trackerState: string, priority?: bigint, attempt: number, profileDigest: string, profileRevision: bigint, status: AutomationClaimStatus, worktree: string, sourceRevision: string, issueTask?: OrchestraAgentReference, workflowRunId?: string, workflowStatus?: OrchestraRunStatus, effects: Array<AutomationEffectReceiptProjection>, hookReceipts: Array<AutomationHookReceiptProjection>, cleanup: AutomationCleanupProjection, nextAction: OrchestraBoundedText, };
+export type AutomationIssueClaimProjection = { claimId: string, issueId: string, issueIdentifier: string, issueTitle: OrchestraBoundedText, trackerState: string, priority?: bigint, attempt: number, profileDigest: string, profileRevision: bigint, status: AutomationClaimStatus, worktree: string, sourceRevision: string, issueTask?: OrchestraAgentReference, workflowRunId?: string, workflowStatus?: OrchestraRunStatus, effects: Array<AutomationEffectReceiptProjection>, latestSteeringReceipt?: AutomationSteeringReceipt, hookReceipts: Array<AutomationHookReceiptProjection>, cleanup: AutomationCleanupProjection, nextAction: OrchestraBoundedText, };

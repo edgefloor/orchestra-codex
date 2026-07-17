@@ -670,6 +670,11 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::AutomationValidateResponse,
     },
+    AutomationStart => "automation/start" {
+        params: v2::AutomationStartParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AutomationRunResponse,
+    },
     AutomationRunFixture => "automation/runFixture" {
         params: v2::AutomationRunFixtureParams,
         serialization: thread_id(params.thread_id),
@@ -721,6 +726,11 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         manual_payload_conversion: manual,
         response: v2::AutomationRunResponse,
+    },
+    AutomationSteerIssue => "automation/steerIssue" {
+        params: v2::AutomationSteerIssueParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::AutomationSteerIssueResponse,
     },
     OrchestraInvoke => "orchestra/invoke" {
         params: v2::OrchestraInvokeParams,

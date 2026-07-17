@@ -1641,6 +1641,16 @@
         "issueTitle": {
           "$ref": "#/definitions/OrchestraBoundedText"
         },
+        "latestSteeringReceipt": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutomationSteeringReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "nextAction": {
           "$ref": "#/definitions/OrchestraBoundedText"
         },
@@ -2293,6 +2303,130 @@
         "reference"
       ],
       "type": "object"
+    },
+    "AutomationStartParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "profilePath": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profilePath",
+        "threadId"
+      ],
+      "title": "AutomationStartParams",
+      "type": "object"
+    },
+    "AutomationSteerIssueParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "claimId": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "claimId",
+        "input",
+        "runId",
+        "threadId"
+      ],
+      "title": "AutomationSteerIssueParams",
+      "type": "object"
+    },
+    "AutomationSteerIssueResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "receipt": {
+          "$ref": "#/definitions/AutomationSteeringReceipt"
+        },
+        "run": {
+          "$ref": "#/definitions/AutomationRunProjection"
+        }
+      },
+      "required": [
+        "receipt",
+        "run"
+      ],
+      "title": "AutomationSteerIssueResponse",
+      "type": "object"
+    },
+    "AutomationSteeringReceipt": {
+      "properties": {
+        "authority": {
+          "type": "string"
+        },
+        "failure": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "initiatorThreadId": {
+          "type": "string"
+        },
+        "inputPreview": {
+          "type": "string"
+        },
+        "inputSha256": {
+          "type": "string"
+        },
+        "providerReceipt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sequence": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/AutomationSteeringStatus"
+        },
+        "submittedAtMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "targetThreadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "authority",
+        "initiatorThreadId",
+        "inputPreview",
+        "inputSha256",
+        "sequence",
+        "status",
+        "submittedAtMs",
+        "targetThreadId"
+      ],
+      "type": "object"
+    },
+    "AutomationSteeringStatus": {
+      "enum": [
+        "submitted",
+        "delivered",
+        "failed"
+      ],
+      "type": "string"
     },
     "AutomationTrackerProfile": {
       "properties": {
@@ -3171,6 +3305,30 @@
             },
             "method": {
               "enum": [
+                "automation/start"
+              ],
+              "title": "Automation/startRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AutomationStartParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Automation/startRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
                 "automation/runFixture"
               ],
               "title": "Automation/runFixtureRequestMethod",
@@ -3378,6 +3536,30 @@
             "params"
           ],
           "title": "Automation/cancelIssueRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "automation/steerIssue"
+              ],
+              "title": "Automation/steerIssueRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AutomationSteerIssueParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Automation/steerIssueRequest",
           "type": "object"
         },
         {

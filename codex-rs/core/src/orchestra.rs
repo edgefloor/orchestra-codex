@@ -362,6 +362,22 @@ impl OrchestraControl {
             .map(|_| ())
     }
 
+    pub async fn send_input(
+        &self,
+        handle: &OrchestraAgentHandle,
+        input: String,
+    ) -> CodexResult<String> {
+        self.control
+            .send_input(
+                handle.thread_id,
+                vec![UserInput::Text {
+                    text: input,
+                    text_elements: Vec::new(),
+                }],
+            )
+            .await
+    }
+
     pub async fn run_command(
         &self,
         request: OrchestraCommandRequest,
