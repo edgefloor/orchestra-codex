@@ -287,6 +287,7 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::WorldState(_) => None,
+        RolloutItem::Orchestra(_) => None,
     }
 }
 

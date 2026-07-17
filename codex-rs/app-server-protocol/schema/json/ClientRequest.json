@@ -169,6 +169,308 @@
         }
       ]
     },
+    "AutomationCancelIssueParams": {
+      "additionalProperties": false,
+      "properties": {
+        "claimId": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "claimId",
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutomationIssue": {
+      "properties": {
+        "blockedBy": {
+          "items": {
+            "$ref": "#/definitions/AutomationIssueBlocker"
+          },
+          "type": "array"
+        },
+        "branchName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "identifier": {
+          "type": "string"
+        },
+        "labels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "priority": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "blockedBy",
+        "id",
+        "identifier",
+        "labels",
+        "state",
+        "title"
+      ],
+      "type": "object"
+    },
+    "AutomationIssueBlocker": {
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "identifier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AutomationLinearReadKind": {
+      "enum": [
+        "candidates",
+        "terminal",
+        "refresh"
+      ],
+      "type": "string"
+    },
+    "AutomationLinearReadParams": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "first": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "issueIdentifier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/AutomationLinearReadKind"
+        },
+        "profilePath": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "profilePath",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutomationQueueCategory": {
+      "enum": [
+        "queued",
+        "running",
+        "blocked",
+        "waiting_gate",
+        "handoff",
+        "terminal"
+      ],
+      "type": "string"
+    },
+    "AutomationQueueReadParams": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/definitions/AutomationQueueCategory"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "category",
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutomationReconcileParams": {
+      "additionalProperties": false,
+      "properties": {
+        "profilePath": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profilePath",
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutomationRunFixtureParams": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fixtureIssue": {
+          "$ref": "#/definitions/AutomationIssue"
+        },
+        "profilePath": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fixtureIssue",
+        "profilePath",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutomationRunParams": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "AutomationValidateParams": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fixtureIssue": {
+          "$ref": "#/definitions/AutomationIssue"
+        },
+        "profilePath": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fixtureIssue",
+        "profilePath",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -1876,6 +2178,172 @@
         "enabled"
       ],
       "type": "string"
+    },
+    "OrchestraHistoryCursor": {
+      "properties": {
+        "itemId": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "itemId",
+        "revision",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "OrchestraInvokeParams": {
+      "properties": {
+        "inputs": true,
+        "threadId": {
+          "type": "string"
+        },
+        "workflowPath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "workflowPath"
+      ],
+      "type": "object"
+    },
+    "OrchestraQueryKind": {
+      "enum": [
+        "run",
+        "steps",
+        "outputs",
+        "evidence",
+        "evidence_content",
+        "history",
+        "digest"
+      ],
+      "type": "string"
+    },
+    "OrchestraQueryParams": {
+      "properties": {
+        "after": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidenceId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "historyAfter": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraHistoryCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxBytes": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxItems": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "selector": {
+          "$ref": "#/definitions/OrchestraQueryKind"
+        },
+        "stepId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "selector",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "OrchestraResumeParams": {
+      "properties": {
+        "approvalDecision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputs": true,
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "OrchestraRunParams": {
+      "properties": {
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "OrchestraValidateParams": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "workflowPath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "workflowPath"
+      ],
+      "type": "object"
     },
     "PermissionProfileListParams": {
       "properties": {
@@ -5381,6 +5849,390 @@
         "params"
       ],
       "title": "Thread/injectItemsRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "orchestra/validate"
+          ],
+          "title": "Orchestra/validateRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/OrchestraValidateParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Orchestra/validateRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/validate"
+          ],
+          "title": "Automation/validateRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationValidateParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/validateRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/runFixture"
+          ],
+          "title": "Automation/runFixtureRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationRunFixtureParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/runFixtureRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/linear/read"
+          ],
+          "title": "Automation/linear/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationLinearReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/linear/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/queue/read"
+          ],
+          "title": "Automation/queue/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationQueueReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/queue/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/status"
+          ],
+          "title": "Automation/statusRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationRunParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/statusRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/pause"
+          ],
+          "title": "Automation/pauseRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationRunParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/pauseRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/refresh"
+          ],
+          "title": "Automation/refreshRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationReconcileParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/refreshRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/resume"
+          ],
+          "title": "Automation/resumeRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationReconcileParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/resumeRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/cancel"
+          ],
+          "title": "Automation/cancelRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationRunParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/cancelRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "automation/cancelIssue"
+          ],
+          "title": "Automation/cancelIssueRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AutomationCancelIssueParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Automation/cancelIssueRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "orchestra/invoke"
+          ],
+          "title": "Orchestra/invokeRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/OrchestraInvokeParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Orchestra/invokeRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "orchestra/status"
+          ],
+          "title": "Orchestra/statusRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/OrchestraRunParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Orchestra/statusRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "orchestra/resume"
+          ],
+          "title": "Orchestra/resumeRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/OrchestraResumeParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Orchestra/resumeRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "orchestra/cancel"
+          ],
+          "title": "Orchestra/cancelRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/OrchestraRunParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Orchestra/cancelRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "orchestra/query"
+          ],
+          "title": "Orchestra/queryRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/OrchestraQueryParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Orchestra/queryRequest",
       "type": "object"
     },
     {

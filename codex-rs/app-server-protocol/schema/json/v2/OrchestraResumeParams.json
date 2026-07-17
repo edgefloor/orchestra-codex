@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "approvalDecision": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "inputs": true,
+    "runId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "runId",
+    "threadId"
+  ],
+  "title": "OrchestraResumeParams",
+  "type": "object"
+}

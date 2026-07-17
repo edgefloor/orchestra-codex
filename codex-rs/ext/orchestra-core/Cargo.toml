@@ -1,0 +1,19 @@
+[package]
+name = "codex-orchestra-core"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+async-trait = "0.1.89"
+minijinja = "2.21.0"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_json_canonicalizer = "0.3.2"
+serde_yaml_ng = "0.10.0"
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

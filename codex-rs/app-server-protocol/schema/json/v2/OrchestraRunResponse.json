@@ -1,0 +1,140 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "OrchestraPromotionStatus": {
+      "enum": [
+        "pending",
+        "applied",
+        "notRequired"
+      ],
+      "type": "string"
+    },
+    "OrchestraRunProjection": {
+      "properties": {
+        "nextAction": {
+          "type": "string"
+        },
+        "parentThreadId": {
+          "type": "string"
+        },
+        "promotion": {
+          "$ref": "#/definitions/OrchestraPromotionStatus"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/OrchestraRunStatus"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/definitions/OrchestraStepProjection"
+          },
+          "type": "array"
+        },
+        "workflowSha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nextAction",
+        "parentThreadId",
+        "promotion",
+        "runId",
+        "schemaVersion",
+        "sourceRevision",
+        "status",
+        "steps",
+        "workflowSha256"
+      ],
+      "type": "object"
+    },
+    "OrchestraRunStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "waitingApproval",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "OrchestraStepProjection": {
+      "properties": {
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finalResponse": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "outputKeys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rounds": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/OrchestraStepStatus"
+        }
+      },
+      "required": [
+        "attempts",
+        "id",
+        "outputKeys",
+        "rounds",
+        "status"
+      ],
+      "type": "object"
+    },
+    "OrchestraStepStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "retrying",
+        "waitingApproval",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "run": {
+      "$ref": "#/definitions/OrchestraRunProjection"
+    }
+  },
+  "required": [
+    "run"
+  ],
+  "title": "OrchestraRunResponse",
+  "type": "object"
+}

@@ -596,6 +596,19 @@ impl CodexThread {
         self.codex.session.get_config().await
     }
 
+    /// Returns the narrow Orchestra capability backed by this thread's active
+    /// V2 `AgentControl`, preserving lineage, residency, and completion watchers.
+    pub async fn orchestra_control(&self) -> crate::orchestra::OrchestraControl {
+        crate::orchestra::OrchestraControl::new(
+            self.codex.session.services.agent_control.clone(),
+            self.session_configured.thread_id,
+            self.session_source.clone(),
+            (*self.config().await).clone(),
+            self.codex.session.services.skills_service.clone(),
+            self.codex.session.services.plugins_manager.clone(),
+        )
+    }
+
     /// Resolves the MCP runtime configuration using this thread's extension data.
     pub async fn runtime_mcp_config(&self, config: &crate::config::Config) -> codex_mcp::McpConfig {
         self.codex.session.runtime_mcp_config(config).await

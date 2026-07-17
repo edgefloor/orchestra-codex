@@ -80,6 +80,7 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::Orchestra(_)
         | RolloutItem::EventMsg(_) => ThreadHistoryChangeSet::default(),
     }
 }

@@ -1,0 +1,444 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AutomationAgentProfile": {
+      "properties": {
+        "maxConcurrentAgents": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxConcurrentAgentsByState": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "maxRetryBackoffMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxTurns": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxConcurrentAgents",
+        "maxConcurrentAgentsByState",
+        "maxRetryBackoffMs",
+        "maxTurns"
+      ],
+      "type": "object"
+    },
+    "AutomationCodexPolicy": {
+      "properties": {
+        "approvalPolicy": true,
+        "readTimeoutMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "stallTimeoutMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadSandbox": {
+          "type": "string"
+        },
+        "turnSandboxPolicy": true,
+        "turnTimeoutMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "approvalPolicy",
+        "readTimeoutMs",
+        "stallTimeoutMs",
+        "threadSandbox",
+        "turnSandboxPolicy",
+        "turnTimeoutMs"
+      ],
+      "type": "object"
+    },
+    "AutomationDiagnostic": {
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/AutomationDiagnosticCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/definitions/AutomationValidationSeverity"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "path",
+        "severity"
+      ],
+      "type": "object"
+    },
+    "AutomationDiagnosticCode": {
+      "enum": [
+        "missing_workflow_file",
+        "workflow_parse_error",
+        "workflow_front_matter_not_a_map",
+        "missing_field",
+        "invalid_value",
+        "unknown_field",
+        "unsupported_tracker",
+        "missing_secret",
+        "prohibited_codex_command",
+        "policy_broadening",
+        "unsafe_workspace_root",
+        "missing_orchestra_extension",
+        "unsupported_effect",
+        "workflow_compile_error",
+        "workflow_input_missing",
+        "workflow_input_incompatible",
+        "workflow_input_needs_default",
+        "template_parse_error",
+        "template_render_error"
+      ],
+      "type": "string"
+    },
+    "AutomationEffect": {
+      "enum": [
+        "tracker.comment",
+        "tracker.transition",
+        "tracker.link_pull_request"
+      ],
+      "type": "string"
+    },
+    "AutomationHooksProfile": {
+      "properties": {
+        "afterCreate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "afterRun": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "beforeRemove": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "beforeRun": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeoutMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "timeoutMs"
+      ],
+      "type": "object"
+    },
+    "AutomationOrchestraProfile": {
+      "properties": {
+        "effects": {
+          "items": {
+            "$ref": "#/definitions/AutomationEffect"
+          },
+          "type": "array"
+        },
+        "workflowName": {
+          "type": "string"
+        },
+        "workflowPath": {
+          "type": "string"
+        },
+        "workflowSha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "effects",
+        "workflowName",
+        "workflowPath",
+        "workflowSha256"
+      ],
+      "type": "object"
+    },
+    "AutomationPollingProfile": {
+      "properties": {
+        "intervalMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "intervalMs"
+      ],
+      "type": "object"
+    },
+    "AutomationProfile": {
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/AutomationAgentProfile"
+        },
+        "codex": {
+          "$ref": "#/definitions/AutomationCodexPolicy"
+        },
+        "hooks": {
+          "$ref": "#/definitions/AutomationHooksProfile"
+        },
+        "orchestra": {
+          "$ref": "#/definitions/AutomationOrchestraProfile"
+        },
+        "polling": {
+          "$ref": "#/definitions/AutomationPollingProfile"
+        },
+        "promptTemplate": {
+          "type": "string"
+        },
+        "tracker": {
+          "$ref": "#/definitions/AutomationTrackerProfile"
+        },
+        "workspace": {
+          "$ref": "#/definitions/AutomationWorkspaceProfile"
+        }
+      },
+      "required": [
+        "agent",
+        "codex",
+        "hooks",
+        "orchestra",
+        "polling",
+        "promptTemplate",
+        "tracker",
+        "workspace"
+      ],
+      "type": "object"
+    },
+    "AutomationSecretKind": {
+      "enum": [
+        "environment",
+        "inline_digest"
+      ],
+      "type": "string"
+    },
+    "AutomationSecretReference": {
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/AutomationSecretKind"
+        },
+        "reference": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "digest",
+        "kind",
+        "reference"
+      ],
+      "type": "object"
+    },
+    "AutomationTrackerProfile": {
+      "properties": {
+        "activeStates": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "credential": {
+          "$ref": "#/definitions/AutomationSecretReference"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "projectSlug": {
+          "type": "string"
+        },
+        "requiredLabels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "terminalStates": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "activeStates",
+        "credential",
+        "endpoint",
+        "kind",
+        "projectSlug",
+        "requiredLabels",
+        "terminalStates"
+      ],
+      "type": "object"
+    },
+    "AutomationValidationSeverity": {
+      "enum": [
+        "error",
+        "warning"
+      ],
+      "type": "string"
+    },
+    "AutomationWorkflowInput": {
+      "properties": {
+        "default": true,
+        "kind": {
+          "$ref": "#/definitions/AutomationWorkflowInputKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "required"
+      ],
+      "type": "object"
+    },
+    "AutomationWorkflowInputKind": {
+      "enum": [
+        "string",
+        "number",
+        "boolean",
+        "object",
+        "array",
+        "json"
+      ],
+      "type": "string"
+    },
+    "AutomationWorkflowPreview": {
+      "properties": {
+        "effects": {
+          "items": {
+            "$ref": "#/definitions/AutomationEffect"
+          },
+          "type": "array"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/definitions/AutomationWorkflowInput"
+          },
+          "type": "array"
+        },
+        "renderedPrompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secretReferences": {
+          "items": {
+            "$ref": "#/definitions/AutomationSecretReference"
+          },
+          "type": "array"
+        },
+        "workflow": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "effects",
+        "inputs",
+        "secretReferences"
+      ],
+      "type": "object"
+    },
+    "AutomationWorkspaceProfile": {
+      "properties": {
+        "root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "diagnostics": {
+      "items": {
+        "$ref": "#/definitions/AutomationDiagnostic"
+      },
+      "type": "array"
+    },
+    "preview": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AutomationWorkflowPreview"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "profile": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AutomationProfile"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "profileDigest": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "valid": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "diagnostics",
+    "valid"
+  ],
+  "title": "AutomationValidateResponse",
+  "type": "object"
+}

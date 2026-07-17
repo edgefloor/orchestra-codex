@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::io;
+use std::path::Component;
+use std::path::Path;
 use std::sync::Arc;
 
 use codex_exec_server::ExecutorFileSystem;
@@ -155,6 +157,47 @@ impl HostSkillsSnapshot {
             .unwrap_or_else(|| Arc::clone(&LOCAL_FS));
         let path = PathUri::from_abs_path(&skill.path_to_skills_md);
         fs.read_file_text(&path, /*sandbox*/ None).await
+    }
+
+    pub async fn read_skill_resource(
+        &self,
+        skill: &SkillMetadata,
+        relative: &str,
+    ) -> io::Result<Vec<u8>> {
+        let relative = Path::new(relative);
+        if relative.to_string_lossy().contains('\\')
+            || relative.is_absolute()
+            || !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "skill resource path must be safe and relative",
+            ));
+        }
+        let parent = skill.path_to_skills_md.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "skill path has no parent")
+        })?;
+        let fs = self
+            .outcome
+            .file_system_for_skill(skill)
+            .unwrap_or_else(|| Arc::clone(&LOCAL_FS));
+        let parent = PathUri::from_abs_path(&parent);
+        let candidate = parent
+            .join(relative.to_str().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "resource path is not UTF-8")
+            })?)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let canonical_parent = fs.canonicalize(&parent, None).await?;
+        let canonical_candidate = fs.canonicalize(&candidate, None).await?;
+        if !canonical_candidate.starts_with(&canonical_parent) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "skill resource path escapes the skill directory",
+            ));
+        }
+        fs.read_file(&canonical_candidate, None).await
     }
 }
 

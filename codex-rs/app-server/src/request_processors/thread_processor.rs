@@ -2245,7 +2245,82 @@ impl ThreadRequestProcessor {
             .read_thread_view(thread_uuid, include_turns)
             .await
             .map_err(thread_read_view_error)?;
-        Ok(ThreadReadResponse { thread })
+        let orchestra = self
+            .load_orchestra_task_replay(thread_uuid)
+            .await
+            .map_err(thread_read_view_error)?;
+        Ok(ThreadReadResponse { thread, orchestra })
+    }
+
+    async fn load_orchestra_task_replay(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Option<OrchestraTaskReplay>, ThreadReadViewError> {
+        let state_db = match self.thread_manager.get_thread(thread_id).await {
+            Ok(thread) => thread.state_db(),
+            Err(_) => codex_rollout::state_db::get_state_db(self.config.as_ref()).await,
+        };
+        if let Some(state_db) = state_db.as_ref() {
+            match state_db.orchestra_task_snapshot(thread_id).await {
+                Ok(Some(snapshot)) => return Ok(Some(project_persisted_snapshot(snapshot))),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%thread_id, %error, "failed to read Orchestra task projection");
+                }
+            }
+        }
+
+        let stored = match self
+            .thread_store
+            .read_thread(StoreReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: true,
+            })
+            .await
+        {
+            Ok(stored) => stored,
+            Err(error) => {
+                tracing::warn!(%thread_id, %error, "failed to rebuild Orchestra task projection from rollout");
+                return Ok(None);
+            }
+        };
+        let mut events = stored
+            .history
+            .into_iter()
+            .flat_map(|history| history.items)
+            .filter_map(|item| match item {
+                RolloutItem::Orchestra(event) => Some(event),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.sequence);
+        events.dedup_by(|right, left| {
+            right.event_id == left.event_id
+                || (right.run_id == left.run_id && right.revision == left.revision)
+        });
+        let replay_truncated = events.len() > 64;
+        if replay_truncated {
+            events.drain(..events.len() - 64);
+        }
+        let Some(projection) = events.last().cloned() else {
+            return Ok(None);
+        };
+        if let Some(state_db) = state_db {
+            for event in &events {
+                if let Err(error) = state_db.apply_orchestra_event(thread_id, event).await {
+                    tracing::warn!(%thread_id, %error, "failed to rebuild Orchestra task projection");
+                    break;
+                }
+            }
+        }
+        Ok(Some(project_persisted_snapshot(
+            codex_state::OrchestraTaskSnapshot {
+                projection,
+                replay: events,
+                replay_truncated,
+            },
+        )))
     }
 
     /// Builds the API view for `thread/read` from persisted metadata plus optional live state.

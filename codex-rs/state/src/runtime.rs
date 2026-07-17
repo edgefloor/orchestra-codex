@@ -66,6 +66,7 @@ mod external_agent_config_imports;
 mod goals;
 mod logs;
 mod memories;
+mod orchestra;
 mod recovery;
 mod remote_control;
 #[cfg(test)]
@@ -81,6 +82,7 @@ pub use goals::GoalAccountingOutcome;
 pub use goals::GoalStore;
 pub use goals::GoalUpdate;
 pub use memories::MemoryStore;
+pub use orchestra::OrchestraTaskSnapshot;
 pub use recovery::RuntimeDbBackup;
 pub use recovery::backup_runtime_db_for_fresh_start;
 pub use recovery::is_sqlite_corruption_error;

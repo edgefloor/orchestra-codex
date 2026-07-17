@@ -146,12 +146,22 @@ fn emit_skill_injected_metric(
 /// Complexity: `O(T + (N_s + N_t) * S)` time, `O(S + M)` space, where:
 /// `S` = number of skills, `T` = total text length, `N_s` = number of structured skill inputs,
 /// `N_t` = number of text inputs, `M` = max mentions parsed from a single text input.
+pub const ORCHESTRA_LITERAL_TASK_MARKER: &str = "orchestra://literal-task";
+
 pub fn collect_explicit_skill_mentions(
     inputs: &[UserInput],
     skills: &[SkillMetadata],
     disabled_paths: &HashSet<AbsolutePathBuf>,
     connector_slug_counts: &HashMap<String, usize>,
 ) -> Vec<SkillMetadata> {
+    if inputs.iter().any(|input| {
+        matches!(
+            input,
+            UserInput::Mention { path, .. } if path == ORCHESTRA_LITERAL_TASK_MARKER
+        )
+    }) {
+        return Vec::new();
+    }
     let skill_name_counts = build_skill_name_counts(skills, disabled_paths).0;
 
     let selection_context = SkillSelectionContext {

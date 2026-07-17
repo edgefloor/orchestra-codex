@@ -1,0 +1,27 @@
+[package]
+name = "codex-orchestra-extension"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "codex_orchestra_extension"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+codex-core = { workspace = true }
+codex-http-client = { workspace = true }
+codex-extension-api = { workspace = true }
+codex-orchestra-core = { path = "../orchestra-core" }
+codex-protocol = { workspace = true }
+codex-tools = { workspace = true }
+codex-utils-absolute-path = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["process", "rt", "sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

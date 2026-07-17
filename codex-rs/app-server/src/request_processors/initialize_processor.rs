@@ -15,6 +15,24 @@ use crate::message_processor::InitializedConnectionSessionState;
 
 const NON_ORIGINATING_CLIENT_NAMES: &[&str] = &["codex_app_server_daemon", "codex-backend"];
 
+fn orchestra_product_manifest() -> Option<OrchestraReleaseManifest> {
+    let path = std::env::var_os("ORCHESTRA_RELEASE_MANIFEST")?;
+    match std::fs::read(&path)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
+    {
+        Ok(manifest) => Some(manifest),
+        Err(error) => {
+            tracing::error!(
+                path = %std::path::Path::new(&path).display(),
+                error,
+                "failed to load the Orchestra Product release manifest"
+            );
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct InitializeRequestProcessor {
     outgoing: Arc<OutgoingMessageSender>,
@@ -140,6 +158,7 @@ impl InitializeRequestProcessor {
             codex_home,
             platform_family: std::env::consts::FAMILY.to_string(),
             platform_os: std::env::consts::OS.to_string(),
+            orchestra_product: orchestra_product_manifest(),
         };
 
         self.outgoing

@@ -43,6 +43,7 @@ use crate::transport::auth::policy_from_settings;
 use crate::transport::prepare_control_socket_path;
 use crate::transport::route_outgoing_envelope;
 use crate::transport::start_control_socket_acceptor;
+use crate::transport::start_framed_stdio_connection;
 use crate::transport::start_remote_control;
 use crate::transport::start_stdio_connection;
 use crate::transport::start_websocket_acceptor;
@@ -680,7 +681,10 @@ pub async fn run_main_with_transport_options(
     let transport_shutdown_token = CancellationToken::new();
     let mut transport_accept_handles = Vec::<JoinHandle<()>>::new();
 
-    let single_client_mode = matches!(&transport, AppServerTransport::Stdio);
+    let single_client_mode = matches!(
+        &transport,
+        AppServerTransport::Stdio | AppServerTransport::FramedStdio
+    );
     let shutdown_when_no_connections = single_client_mode;
     let graceful_signal_restart_enabled =
         runtime_options.install_shutdown_signal_handler && !single_client_mode;
@@ -691,6 +695,16 @@ pub async fn run_main_with_transport_options(
             let (stdio_client_name_tx, stdio_client_name_rx) = oneshot::channel::<String>();
             app_server_client_name_rx = Some(stdio_client_name_rx);
             start_stdio_connection(
+                transport_event_tx.clone(),
+                &mut transport_accept_handles,
+                stdio_client_name_tx,
+            )
+            .await?;
+        }
+        AppServerTransport::FramedStdio => {
+            let (stdio_client_name_tx, stdio_client_name_rx) = oneshot::channel::<String>();
+            app_server_client_name_rx = Some(stdio_client_name_rx);
+            start_framed_stdio_connection(
                 transport_event_tx.clone(),
                 &mut transport_accept_handles,
                 stdio_client_name_tx,
@@ -1320,7 +1334,7 @@ fn loader_overrides_with_test_user_config_file(
 
 fn analytics_rpc_transport(transport: &AppServerTransport) -> AppServerRpcTransport {
     match transport {
-        AppServerTransport::Stdio => AppServerRpcTransport::Stdio,
+        AppServerTransport::Stdio | AppServerTransport::FramedStdio => AppServerRpcTransport::Stdio,
         AppServerTransport::UnixSocket { .. }
         | AppServerTransport::WebSocket { .. }
         | AppServerTransport::Off => AppServerRpcTransport::Websocket,

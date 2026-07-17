@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -71,6 +72,49 @@ pub struct InitializeResponse {
     /// Operating system for the running app-server target, for example
     /// `"macos"`, `"linux"`, or `"windows"`.
     pub platform_os: String,
+    /// Exact native Product tuple. Stock Codex builds omit this field; the
+    /// Orchestra desktop requires it and fails closed when it is absent.
+    #[serde(default)]
+    pub orchestra_product: Option<OrchestraReleaseManifest>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestraReleaseManifest {
+    pub schema_version: u32,
+    pub product_version: String,
+    pub minimum_macos: String,
+    pub target: String,
+    pub sources: BTreeMap<String, String>,
+    pub schemas: BTreeMap<String, OrchestraSchemaIdentity>,
+    pub evaluator: OrchestraEvaluatorIdentity,
+    pub capabilities: Vec<String>,
+    pub limits: BTreeMap<String, u64>,
+    pub artifacts: BTreeMap<String, OrchestraArtifactIdentity>,
+    pub manifest_sha256: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestraSchemaIdentity {
+    pub identity: String,
+    pub sha256: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestraEvaluatorIdentity {
+    pub revision: String,
+    pub adapter_abi: String,
+    pub canonicalizer: String,
+    pub issue_format: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestraArtifactIdentity {
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

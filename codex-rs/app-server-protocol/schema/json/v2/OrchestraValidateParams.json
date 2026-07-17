@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "threadId": {
+      "type": "string"
+    },
+    "workflowPath": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "threadId",
+    "workflowPath"
+  ],
+  "title": "OrchestraValidateParams",
+  "type": "object"
+}

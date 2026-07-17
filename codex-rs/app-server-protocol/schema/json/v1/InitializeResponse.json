@@ -4,6 +4,131 @@
     "AbsolutePathBuf": {
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
+    },
+    "OrchestraArtifactIdentity": {
+      "properties": {
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bytes",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "OrchestraEvaluatorIdentity": {
+      "properties": {
+        "adapterAbi": {
+          "type": "string"
+        },
+        "canonicalizer": {
+          "type": "string"
+        },
+        "issueFormat": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "adapterAbi",
+        "canonicalizer",
+        "issueFormat",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "OrchestraReleaseManifest": {
+      "properties": {
+        "artifacts": {
+          "additionalProperties": {
+            "$ref": "#/definitions/OrchestraArtifactIdentity"
+          },
+          "type": "object"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "evaluator": {
+          "$ref": "#/definitions/OrchestraEvaluatorIdentity"
+        },
+        "limits": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "manifestSha256": {
+          "type": "string"
+        },
+        "minimumMacos": {
+          "type": "string"
+        },
+        "productVersion": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "schemas": {
+          "additionalProperties": {
+            "$ref": "#/definitions/OrchestraSchemaIdentity"
+          },
+          "type": "object"
+        },
+        "sources": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifacts",
+        "capabilities",
+        "evaluator",
+        "limits",
+        "manifestSha256",
+        "minimumMacos",
+        "productVersion",
+        "schemaVersion",
+        "schemas",
+        "sources",
+        "target"
+      ],
+      "type": "object"
+    },
+    "OrchestraSchemaIdentity": {
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "sha256"
+      ],
+      "type": "object"
     }
   },
   "properties": {
@@ -14,6 +139,18 @@
         }
       ],
       "description": "Absolute path to the server's $CODEX_HOME directory."
+    },
+    "orchestraProduct": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/OrchestraReleaseManifest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Exact native Product tuple. Stock Codex builds omit this field; the Orchestra desktop requires it and fails closed when it is absent."
     },
     "platformFamily": {
       "description": "Platform family for the running app-server target, for example `\"unix\"` or `\"windows\"`.",

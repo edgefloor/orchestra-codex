@@ -2663,6 +2663,7 @@ impl InitialHistory {
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::WorldState(_)
+                | RolloutItem::Orchestra(_)
                 | RolloutItem::EventMsg(_) => None,
             })
             .and_then(|turn_context| turn_context.multi_agent_mode.clone())
@@ -2999,6 +3000,7 @@ fn multi_agent_version_from_items(
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::Orchestra(_)
             | RolloutItem::EventMsg(_) => None,
         })
     })
@@ -3161,7 +3163,86 @@ pub enum RolloutItem {
     Compacted(CompactedItem),
     TurnContext(TurnContextItem),
     WorldState(WorldStateItem),
+    /// Task-scoped Orchestra lifecycle revision. Repository checkpoints remain
+    /// execution authority; this item is the durable semantic/replay record.
+    Orchestra(OrchestraRolloutItem),
     EventMsg(EventMsg),
+}
+
+/// A single semantic Orchestra lifecycle revision persisted in the parent
+/// task's rollout. `sequence` is monotonic only within that task.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+pub struct OrchestraRolloutItem {
+    pub schema_version: u32,
+    pub event_id: String,
+    pub run_id: String,
+    pub sequence: u64,
+    pub revision: u64,
+    pub kind: OrchestraLifecycleKind,
+    pub projection: OrchestraRunProjection,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestraLifecycleKind {
+    Invoked,
+    Resumed,
+    Cancelled,
+    Recovered,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+pub struct OrchestraRunProjection {
+    pub run_id: String,
+    pub workflow_sha256: String,
+    pub parent_thread_id: String,
+    pub source_revision: String,
+    pub status: OrchestraRunStatus,
+    pub promotion: OrchestraPromotionStatus,
+    pub steps: Vec<OrchestraStepProjection>,
+    pub next_action: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestraRunStatus {
+    Pending,
+    Running,
+    WaitingApproval,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestraPromotionStatus {
+    Pending,
+    Applied,
+    NotRequired,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+pub struct OrchestraStepProjection {
+    pub id: String,
+    pub status: OrchestraStepStatus,
+    pub attempts: u32,
+    pub rounds: u32,
+    pub output_keys: Vec<String>,
+    pub final_response: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestraStepStatus {
+    Pending,
+    Running,
+    Retrying,
+    WaitingApproval,
+    Completed,
+    Failed,
+    Cancelled,
 }
 
 /// Persisted comparison state used to resume model-visible world-state diffing.

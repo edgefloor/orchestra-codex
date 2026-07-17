@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AutomationLinearReadKind": {
+      "enum": [
+        "candidates",
+        "terminal",
+        "refresh"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "after": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "first": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "issueIdentifier": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "kind": {
+      "$ref": "#/definitions/AutomationLinearReadKind"
+    },
+    "profilePath": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "profilePath",
+    "threadId"
+  ],
+  "title": "AutomationLinearReadParams",
+  "type": "object"
+}

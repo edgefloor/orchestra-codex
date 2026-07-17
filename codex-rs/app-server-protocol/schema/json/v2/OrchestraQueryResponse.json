@@ -1,0 +1,680 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "OrchestraAgentReference": {
+      "properties": {
+        "taskPath": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskPath",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "OrchestraBoundedText": {
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "OrchestraEvidenceAvailability": {
+      "enum": [
+        "available",
+        "content_too_large",
+        "malformed"
+      ],
+      "type": "string"
+    },
+    "OrchestraEvidenceContentProjection": {
+      "properties": {
+        "availability": {
+          "$ref": "#/definitions/OrchestraEvidenceAvailability"
+        },
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidenceId": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/OrchestraEvidenceKind"
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/definitions/OrchestraEvidenceProvenance"
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "availability",
+        "bytes",
+        "evidenceId",
+        "kind",
+        "mediaType",
+        "name",
+        "provenance"
+      ],
+      "type": "object"
+    },
+    "OrchestraEvidenceKind": {
+      "enum": [
+        "check",
+        "change",
+        "skill",
+        "other"
+      ],
+      "type": "string"
+    },
+    "OrchestraEvidencePage": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/OrchestraEvidenceReference"
+          },
+          "type": "array"
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "OrchestraEvidenceProvenance": {
+      "enum": [
+        "runtime_check",
+        "runtime_change",
+        "skill_snapshot",
+        "runtime_other"
+      ],
+      "type": "string"
+    },
+    "OrchestraEvidenceReference": {
+      "properties": {
+        "availability": {
+          "$ref": "#/definitions/OrchestraEvidenceAvailability"
+        },
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "evidenceId": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/OrchestraEvidenceKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/definitions/OrchestraEvidenceProvenance"
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stepId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "availability",
+        "bytes",
+        "evidenceId",
+        "kind",
+        "name",
+        "provenance"
+      ],
+      "type": "object"
+    },
+    "OrchestraExecutionRunProjection": {
+      "properties": {
+        "nextAction": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        },
+        "promotion": {
+          "$ref": "#/definitions/OrchestraPromotionStatus"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/OrchestraRunStatus"
+        },
+        "stepCounts": {
+          "$ref": "#/definitions/OrchestraStepCounts"
+        },
+        "workflowSha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nextAction",
+        "promotion",
+        "runId",
+        "schemaVersion",
+        "sourceRevision",
+        "status",
+        "stepCounts",
+        "workflowSha256"
+      ],
+      "type": "object"
+    },
+    "OrchestraExecutionStepProjection": {
+      "properties": {
+        "agent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraAgentReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "approvalDecision": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraBoundedText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "contextSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraBoundedText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "outputCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "rounds": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/OrchestraStepStatus"
+        }
+      },
+      "required": [
+        "attempts",
+        "id",
+        "outputCount",
+        "rounds",
+        "status"
+      ],
+      "type": "object"
+    },
+    "OrchestraHistoryCursor": {
+      "properties": {
+        "itemId": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "itemId",
+        "revision",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "OrchestraHistoryPage": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/OrchestraHistoryRecord"
+          },
+          "type": "array"
+        },
+        "next": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraHistoryCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "OrchestraHistoryRecord": {
+      "properties": {
+        "itemId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "stepId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "itemId",
+        "kind",
+        "revision",
+        "sequence",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "OrchestraOutputProjection": {
+      "properties": {
+        "canonicalBytes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "stepId": {
+          "type": "string"
+        },
+        "value": true
+      },
+      "required": [
+        "canonicalBytes",
+        "name",
+        "sha256",
+        "stepId"
+      ],
+      "type": "object"
+    },
+    "OrchestraOutputsPage": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/OrchestraOutputProjection"
+          },
+          "type": "array"
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "OrchestraPromotionStatus": {
+      "enum": [
+        "pending",
+        "applied",
+        "notRequired"
+      ],
+      "type": "string"
+    },
+    "OrchestraQueryResult": {
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/OrchestraExecutionRunProjection"
+            },
+            "selector": {
+              "enum": [
+                "run"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "selector"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/OrchestraStepsPage"
+            },
+            "selector": {
+              "enum": [
+                "steps"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "selector"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/OrchestraOutputsPage"
+            },
+            "selector": {
+              "enum": [
+                "outputs"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "selector"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/OrchestraEvidencePage"
+            },
+            "selector": {
+              "enum": [
+                "evidence"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "selector"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/OrchestraEvidenceContentProjection"
+            },
+            "selector": {
+              "enum": [
+                "evidence_content"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "selector"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/OrchestraHistoryPage"
+            },
+            "selector": {
+              "enum": [
+                "history"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "selector"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/OrchestraRunDigest"
+            },
+            "selector": {
+              "enum": [
+                "digest"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "selector"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "OrchestraRunDigest": {
+      "properties": {
+        "omittedSteps": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "stateSha256": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "omittedSteps",
+        "runId",
+        "stateSha256",
+        "text"
+      ],
+      "type": "object"
+    },
+    "OrchestraRunStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "waitingApproval",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "OrchestraStepCounts": {
+      "properties": {
+        "cancelled": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "completed": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "failed": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "pending": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "retrying": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "running": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "waitingApproval": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cancelled",
+        "completed",
+        "failed",
+        "pending",
+        "retrying",
+        "running",
+        "waitingApproval"
+      ],
+      "type": "object"
+    },
+    "OrchestraStepStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "retrying",
+        "waitingApproval",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "OrchestraStepsPage": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/OrchestraExecutionStepProjection"
+          },
+          "type": "array"
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "result": {
+      "$ref": "#/definitions/OrchestraQueryResult"
+    }
+  },
+  "required": [
+    "result"
+  ],
+  "title": "OrchestraQueryResponse",
+  "type": "object"
+}

@@ -47,6 +47,8 @@ codex-external-agent-migration = { workspace = true }
 codex-features = { workspace = true }
 codex-goal-extension = { workspace = true }
 codex-guardian = { workspace = true }
+codex-orchestra-core = { workspace = true }
+codex-orchestra-extension = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-file-watcher = { workspace = true }
 codex-hooks = { workspace = true }
@@ -108,6 +110,7 @@ uuid = { workspace = true, features = ["serde", "v7"] }
 codex-windows-sandbox = { workspace = true }
 
 [dev-dependencies]
+async-trait = "0.1.89"
 app_test_support = { workspace = true }
 axum = { workspace = true, default-features = false, features = [
     "http1",

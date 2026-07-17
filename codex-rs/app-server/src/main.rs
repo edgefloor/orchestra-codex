@@ -23,7 +23,7 @@ struct AppServerArgs {
     config_overrides: CliConfigOverrides,
 
     /// Transport endpoint URL. Supported values: `stdio://` (default),
-    /// `unix://`, `unix://PATH`, `ws://IP:PORT`, `off`.
+    /// `framed-stdio://`, `unix://`, `unix://PATH`, `ws://IP:PORT`, `off`.
     #[arg(
         long = "listen",
         value_name = "URL",

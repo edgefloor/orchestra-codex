@@ -1,6 +1,7 @@
 use super::ActivePermissionProfile;
 use super::ApprovalsReviewer;
 use super::AskForApproval;
+use super::OrchestraTaskReplay;
 use super::SandboxMode;
 use super::SandboxPolicy;
 use super::Thread;
@@ -1284,6 +1285,10 @@ pub struct ThreadReadParams {
 #[ts(export_to = "v2/")]
 pub struct ThreadReadResponse {
     pub thread: Thread,
+    /// Latest bounded Orchestra task projection and replay tail, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub orchestra: Option<OrchestraTaskReplay>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

@@ -52,6 +52,8 @@ members = [
     "ext/connectors",
     "ext/extension-api",
     "ext/goal",
+    "ext/orchestra",
+    "ext/orchestra-core",
     "ext/guardian",
     "ext/image-generation",
     "ext/items",
@@ -185,6 +187,8 @@ codex-extension-api = { path = "ext/extension-api" }
 codex-extension-items = { path = "ext/items" }
 codex-goal-extension = { path = "ext/goal" }
 codex-guardian = { path = "ext/guardian" }
+codex-orchestra-core = { path = "ext/orchestra-core" }
+codex-orchestra-extension = { path = "ext/orchestra" }
 codex-image-generation-extension = { path = "ext/image-generation" }
 codex-external-agent-migration = { path = "external-agent-migration" }
 codex-experimental-api-macros = { path = "codex-experimental-api-macros" }

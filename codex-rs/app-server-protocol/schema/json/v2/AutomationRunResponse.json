@@ -1,0 +1,598 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AutomationClaimStatus": {
+      "enum": [
+        "claimed",
+        "running",
+        "completed",
+        "suspended",
+        "cancelled",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "AutomationCleanupProjection": {
+      "properties": {
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "lastFailure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraBoundedText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/AutomationCleanupStatus"
+        }
+      },
+      "required": [
+        "attempts",
+        "status"
+      ],
+      "type": "object"
+    },
+    "AutomationCleanupStatus": {
+      "enum": [
+        "retained",
+        "eligible",
+        "retry_pending",
+        "removed"
+      ],
+      "type": "string"
+    },
+    "AutomationEffect": {
+      "enum": [
+        "tracker.comment",
+        "tracker.transition",
+        "tracker.link_pull_request"
+      ],
+      "type": "string"
+    },
+    "AutomationEffectReceiptProjection": {
+      "properties": {
+        "bodyPreview": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        },
+        "effectId": {
+          "type": "string"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraBoundedText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gatePolicy": {
+          "$ref": "#/definitions/AutomationGatePolicy"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/AutomationEffect"
+        },
+        "providerReceipt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestSha256": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/AutomationEffectStatus"
+        }
+      },
+      "required": [
+        "bodyPreview",
+        "effectId",
+        "gatePolicy",
+        "idempotencyKey",
+        "kind",
+        "requestSha256",
+        "status"
+      ],
+      "type": "object"
+    },
+    "AutomationEffectStatus": {
+      "enum": [
+        "waiting_gate",
+        "rejected",
+        "executing",
+        "committed",
+        "failed",
+        "ambiguous"
+      ],
+      "type": "string"
+    },
+    "AutomationGatePolicy": {
+      "enum": [
+        "auto_accept",
+        "auto_reject",
+        "ask_human"
+      ],
+      "type": "string"
+    },
+    "AutomationHookKind": {
+      "enum": [
+        "after_create",
+        "before_run",
+        "after_run",
+        "before_remove"
+      ],
+      "type": "string"
+    },
+    "AutomationHookReceiptProjection": {
+      "properties": {
+        "commandSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exitCode": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraBoundedText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "invocation": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/definitions/AutomationHookKind"
+        },
+        "status": {
+          "$ref": "#/definitions/AutomationHookStatus"
+        },
+        "stderrPreview": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        },
+        "stdoutPreview": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        }
+      },
+      "required": [
+        "invocation",
+        "kind",
+        "status",
+        "stderrPreview",
+        "stdoutPreview"
+      ],
+      "type": "object"
+    },
+    "AutomationHookStatus": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "skipped"
+      ],
+      "type": "string"
+    },
+    "AutomationIssueClaimProjection": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "claimId": {
+          "type": "string"
+        },
+        "cleanup": {
+          "$ref": "#/definitions/AutomationCleanupProjection"
+        },
+        "effects": {
+          "items": {
+            "$ref": "#/definitions/AutomationEffectReceiptProjection"
+          },
+          "type": "array"
+        },
+        "hookReceipts": {
+          "items": {
+            "$ref": "#/definitions/AutomationHookReceiptProjection"
+          },
+          "type": "array"
+        },
+        "issueId": {
+          "type": "string"
+        },
+        "issueIdentifier": {
+          "type": "string"
+        },
+        "issueTask": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraAgentReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "issueTitle": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        },
+        "nextAction": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        },
+        "priority": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "profileDigest": {
+          "type": "string"
+        },
+        "profileRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/AutomationClaimStatus"
+        },
+        "trackerState": {
+          "type": "string"
+        },
+        "workflowRunId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workflowStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraRunStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "worktree": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "claimId",
+        "cleanup",
+        "effects",
+        "hookReceipts",
+        "issueId",
+        "issueIdentifier",
+        "issueTitle",
+        "nextAction",
+        "profileDigest",
+        "profileRevision",
+        "sourceRevision",
+        "status",
+        "trackerState",
+        "worktree"
+      ],
+      "type": "object"
+    },
+    "AutomationProfileRevisionStatus": {
+      "enum": [
+        "active",
+        "pending_valid",
+        "rejected"
+      ],
+      "type": "string"
+    },
+    "AutomationQueueCategory": {
+      "enum": [
+        "queued",
+        "running",
+        "blocked",
+        "waiting_gate",
+        "handoff",
+        "terminal"
+      ],
+      "type": "string"
+    },
+    "AutomationQueueCounts": {
+      "properties": {
+        "blocked": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "handoff": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "queued": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "running": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "terminal": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "waitingGate": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "blocked",
+        "handoff",
+        "queued",
+        "running",
+        "terminal",
+        "waitingGate"
+      ],
+      "type": "object"
+    },
+    "AutomationQueueItemProjection": {
+      "properties": {
+        "category": {
+          "$ref": "#/definitions/AutomationQueueCategory"
+        },
+        "claimId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issueId": {
+          "type": "string"
+        },
+        "issueIdentifier": {
+          "type": "string"
+        },
+        "issueTitle": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        },
+        "nextAction": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        },
+        "priority": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "category",
+        "issueId",
+        "issueIdentifier",
+        "issueTitle",
+        "nextAction",
+        "state"
+      ],
+      "type": "object"
+    },
+    "AutomationReconciliationStatus": {
+      "enum": [
+        "complete",
+        "required",
+        "in_progress",
+        "blocked"
+      ],
+      "type": "string"
+    },
+    "AutomationRootStatus": {
+      "enum": [
+        "running",
+        "suspended",
+        "cancelled",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "AutomationRunProjection": {
+      "properties": {
+        "claims": {
+          "items": {
+            "$ref": "#/definitions/AutomationIssueClaimProjection"
+          },
+          "type": "array"
+        },
+        "claimsTotal": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "leaseEpoch": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "nextAction": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        },
+        "ownerThreadId": {
+          "type": "string"
+        },
+        "pendingProfileDigest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profileDiagnostics": {
+          "items": {
+            "$ref": "#/definitions/OrchestraBoundedText"
+          },
+          "type": "array"
+        },
+        "profileDigest": {
+          "type": "string"
+        },
+        "profileRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "profileRevisionStatus": {
+          "$ref": "#/definitions/AutomationProfileRevisionStatus"
+        },
+        "queueCounts": {
+          "$ref": "#/definitions/AutomationQueueCounts"
+        },
+        "queuePreview": {
+          "items": {
+            "$ref": "#/definitions/AutomationQueueItemProjection"
+          },
+          "type": "array"
+        },
+        "queuePreviewTruncated": {
+          "type": "boolean"
+        },
+        "reconciliation": {
+          "$ref": "#/definitions/AutomationReconciliationStatus"
+        },
+        "rejectedProfileDigest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/AutomationRootStatus"
+        },
+        "trackerProjectSlug": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "claims",
+        "claimsTotal",
+        "leaseEpoch",
+        "nextAction",
+        "ownerThreadId",
+        "profileDiagnostics",
+        "profileDigest",
+        "profileRevision",
+        "profileRevisionStatus",
+        "queueCounts",
+        "queuePreview",
+        "queuePreviewTruncated",
+        "reconciliation",
+        "revision",
+        "runId",
+        "schemaVersion",
+        "sourceRevision",
+        "status",
+        "trackerProjectSlug"
+      ],
+      "type": "object"
+    },
+    "OrchestraAgentReference": {
+      "properties": {
+        "taskPath": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskPath",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "OrchestraBoundedText": {
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "OrchestraRunStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "waitingApproval",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "run": {
+      "$ref": "#/definitions/AutomationRunProjection"
+    }
+  },
+  "required": [
+    "run"
+  ],
+  "title": "AutomationRunResponse",
+  "type": "object"
+}

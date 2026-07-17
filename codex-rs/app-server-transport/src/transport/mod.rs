@@ -23,6 +23,7 @@ use tracing::warn;
 /// plenty for an interactive CLI.
 pub const CHANNEL_CAPACITY: usize = 128;
 
+mod framed_stdio;
 mod remote_control;
 mod stdio;
 mod unix_socket;
@@ -30,6 +31,7 @@ mod unix_socket;
 mod unix_socket_tests;
 mod websocket;
 
+pub use framed_stdio::start_framed_stdio_connection;
 pub use remote_control::REMOTE_CONTROL_DISABLED_ENV_VAR;
 pub use remote_control::RemoteControlDisabledByRequirements;
 pub use remote_control::RemoteControlEnableError;
@@ -72,6 +74,7 @@ pub fn app_server_startup_lock_path(codex_home: &Path) -> std::io::Result<Absolu
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppServerTransport {
     Stdio,
+    FramedStdio,
     UnixSocket { socket_path: AbsolutePathBuf },
     WebSocket { bind_address: SocketAddr },
     Off,
@@ -89,7 +92,7 @@ impl std::fmt::Display for AppServerTransportParseError {
         match self {
             AppServerTransportParseError::UnsupportedListenUrl(listen_url) => write!(
                 f,
-                "unsupported --listen URL `{listen_url}`; expected `stdio://`, `unix://`, `unix://PATH`, `ws://IP:PORT`, or `off`"
+                "unsupported --listen URL `{listen_url}`; expected `stdio://`, `framed-stdio://`, `unix://`, `unix://PATH`, `ws://IP:PORT`, or `off`"
             ),
             AppServerTransportParseError::InvalidUnixSocketPath {
                 listen_url,
@@ -114,6 +117,9 @@ impl AppServerTransport {
     pub fn from_listen_url(listen_url: &str) -> Result<Self, AppServerTransportParseError> {
         if listen_url == Self::DEFAULT_LISTEN_URL {
             return Ok(Self::Stdio);
+        }
+        if listen_url == "framed-stdio://" {
+            return Ok(Self::FramedStdio);
         }
 
         if let Some(raw_socket_path) = listen_url.strip_prefix("unix://") {

@@ -32,6 +32,7 @@ use crate::request_processors::GitRequestProcessor;
 use crate::request_processors::InitializeRequestProcessor;
 use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpRequestProcessor;
+use crate::request_processors::OrchestraRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
@@ -117,6 +118,7 @@ pub(crate) struct MessageProcessor {
     initialize_processor: InitializeRequestProcessor,
     marketplace_processor: MarketplaceRequestProcessor,
     mcp_processor: McpRequestProcessor,
+    orchestra_processor: OrchestraRequestProcessor,
     plugin_processor: PluginRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
@@ -392,6 +394,7 @@ impl MessageProcessor {
             outgoing.clone(),
             config_manager.clone(),
         );
+        let orchestra_processor = OrchestraRequestProcessor::new(&thread_manager);
         let plugin_processor = PluginRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -497,6 +500,7 @@ impl MessageProcessor {
             initialize_processor,
             marketplace_processor,
             mcp_processor,
+            orchestra_processor,
             plugin_processor,
             remote_control_processor,
             search_processor,
@@ -1265,6 +1269,86 @@ impl MessageProcessor {
             ClientRequest::ThreadInjectItems { params, .. } => {
                 self.turn_processor.thread_inject_items(params).await
             }
+            ClientRequest::OrchestraValidate { params, .. } => self
+                .orchestra_processor
+                .validate(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::AutomationValidate { params, .. } => self
+                .orchestra_processor
+                .validate_automation(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::AutomationRunFixture { params, .. } => self
+                .orchestra_processor
+                .run_automation_fixture(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::AutomationRunFixture(response))),
+            ClientRequest::AutomationLinearRead { params, .. } => self
+                .orchestra_processor
+                .read_linear_automation(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::AutomationQueueRead { params, .. } => self
+                .orchestra_processor
+                .read_automation_queue(params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::AutomationStatus { params, .. } => self
+                .orchestra_processor
+                .automation_status(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::AutomationStatus(response))),
+            ClientRequest::AutomationPause { params, .. } => self
+                .orchestra_processor
+                .pause_automation(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::AutomationPause(response))),
+            ClientRequest::AutomationRefresh { params, .. } => self
+                .orchestra_processor
+                .refresh_automation(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::AutomationRefresh(response))),
+            ClientRequest::AutomationResume { params, .. } => self
+                .orchestra_processor
+                .resume_automation(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::AutomationResume(response))),
+            ClientRequest::AutomationCancel { params, .. } => self
+                .orchestra_processor
+                .cancel_automation(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::AutomationCancel(response))),
+            ClientRequest::AutomationCancelIssue { params, .. } => self
+                .orchestra_processor
+                .cancel_automation_issue(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::AutomationCancelIssue(response))),
+            ClientRequest::OrchestraInvoke { params, .. } => self
+                .orchestra_processor
+                .invoke(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::OrchestraInvoke(response))),
+            ClientRequest::OrchestraStatus { params, .. } => self
+                .orchestra_processor
+                .status(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::OrchestraStatus(response))),
+            ClientRequest::OrchestraResume { params, .. } => self
+                .orchestra_processor
+                .resume(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::OrchestraResume(response))),
+            ClientRequest::OrchestraCancel { params, .. } => self
+                .orchestra_processor
+                .cancel(params)
+                .await
+                .map(|response| Some(ClientResponsePayload::OrchestraCancel(response))),
+            ClientRequest::OrchestraQuery { params, .. } => self
+                .orchestra_processor
+                .query(params)
+                .await
+                .map(|response| Some(response.into())),
             ClientRequest::TurnSteer { params, .. } => {
                 self.turn_processor.turn_steer(&request_id, params).await
             }

@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AutomationQueueCategory": {
+      "enum": [
+        "queued",
+        "running",
+        "blocked",
+        "waiting_gate",
+        "handoff",
+        "terminal"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "category": {
+      "$ref": "#/definitions/AutomationQueueCategory"
+    },
+    "limit": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "offset": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "runId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "category",
+    "runId",
+    "threadId"
+  ],
+  "title": "AutomationQueueReadParams",
+  "type": "object"
+}

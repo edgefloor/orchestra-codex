@@ -609,6 +609,204 @@
       ],
       "type": "string"
     },
+    "OrchestraLifecycleKind": {
+      "enum": [
+        "invoked",
+        "resumed",
+        "cancelled",
+        "recovered"
+      ],
+      "type": "string"
+    },
+    "OrchestraPromotionStatus": {
+      "enum": [
+        "pending",
+        "applied",
+        "notRequired"
+      ],
+      "type": "string"
+    },
+    "OrchestraReplayEvent": {
+      "properties": {
+        "eventId": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/OrchestraLifecycleKind"
+        },
+        "projection": {
+          "$ref": "#/definitions/OrchestraRunProjection"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "eventId",
+        "kind",
+        "projection",
+        "revision",
+        "runId",
+        "schemaVersion",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "OrchestraRunProjection": {
+      "properties": {
+        "nextAction": {
+          "type": "string"
+        },
+        "parentThreadId": {
+          "type": "string"
+        },
+        "promotion": {
+          "$ref": "#/definitions/OrchestraPromotionStatus"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/OrchestraRunStatus"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/definitions/OrchestraStepProjection"
+          },
+          "type": "array"
+        },
+        "workflowSha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nextAction",
+        "parentThreadId",
+        "promotion",
+        "runId",
+        "schemaVersion",
+        "sourceRevision",
+        "status",
+        "steps",
+        "workflowSha256"
+      ],
+      "type": "object"
+    },
+    "OrchestraRunStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "waitingApproval",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "OrchestraStepProjection": {
+      "properties": {
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finalResponse": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "outputKeys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rounds": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/OrchestraStepStatus"
+        }
+      },
+      "required": [
+        "attempts",
+        "id",
+        "outputKeys",
+        "rounds",
+        "status"
+      ],
+      "type": "object"
+    },
+    "OrchestraStepStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "retrying",
+        "waitingApproval",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "OrchestraTaskReplay": {
+      "description": "Bounded task-local lifecycle replay returned by `thread/read`.",
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/definitions/OrchestraReplayEvent"
+          },
+          "type": "array"
+        },
+        "latest": {
+          "$ref": "#/definitions/OrchestraReplayEvent"
+        },
+        "replayTruncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "events",
+        "latest",
+        "replayTruncated"
+      ],
+      "type": "object"
+    },
     "PatchApplyStatus": {
       "enum": [
         "inProgress",
@@ -2208,6 +2406,17 @@
     }
   },
   "properties": {
+    "orchestra": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/OrchestraTaskReplay"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Latest bounded Orchestra task projection and replay tail, when present."
+    },
     "thread": {
       "$ref": "#/definitions/Thread"
     }

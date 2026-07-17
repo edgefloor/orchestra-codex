@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AutomationQueueCategory": {
+      "enum": [
+        "queued",
+        "running",
+        "blocked",
+        "waiting_gate",
+        "handoff",
+        "terminal"
+      ],
+      "type": "string"
+    },
+    "AutomationQueueItemProjection": {
+      "properties": {
+        "category": {
+          "$ref": "#/definitions/AutomationQueueCategory"
+        },
+        "claimId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issueId": {
+          "type": "string"
+        },
+        "issueIdentifier": {
+          "type": "string"
+        },
+        "issueTitle": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        },
+        "nextAction": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        },
+        "priority": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "category",
+        "issueId",
+        "issueIdentifier",
+        "issueTitle",
+        "nextAction",
+        "state"
+      ],
+      "type": "object"
+    },
+    "OrchestraBoundedText": {
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "truncated"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "category": {
+      "$ref": "#/definitions/AutomationQueueCategory"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/definitions/AutomationQueueItemProjection"
+      },
+      "type": "array"
+    },
+    "nextOffset": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "total": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "category",
+    "items",
+    "total"
+  ],
+  "title": "AutomationQueueReadResponse",
+  "type": "object"
+}

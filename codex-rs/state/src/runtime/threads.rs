@@ -938,6 +938,11 @@ ON CONFLICT(id) DO UPDATE SET
             self.upsert_thread(&metadata).await
         };
         upsert_result?;
+        for item in items {
+            if let RolloutItem::Orchestra(event) = item {
+                self.apply_orchestra_event(builder.id, event).await?;
+            }
+        }
         if let Some(memory_mode) = extract_memory_mode(items)
             && let Err(err) = self
                 .set_thread_memory_mode(builder.id, memory_mode.as_str())
@@ -1245,6 +1250,7 @@ pub(super) fn extract_memory_mode(items: &[RolloutItem]) -> Option<String> {
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::Orchestra(_)
         | RolloutItem::EventMsg(_) => None,
     })
 }
