@@ -220,6 +220,9 @@ async fn automation_start_and_refresh_project_one_durable_missing_credential_fai
         filler.claim_id = format!("{index:05}");
         filler.issue_id = format!("filler-issue-{index:02}");
         filler.issue_identifier = format!("ORC-FILLER-{index:02}");
+        filler.issue_url = Some(format!(
+            "https://linear.app/orchestra/issue/ORC-FILLER-{index:02}"
+        ));
         root.claims.insert(filler.claim_id.clone(), filler);
     }
     store.save(&mut root)?;
@@ -252,7 +255,7 @@ async fn automation_start_and_refresh_project_one_durable_missing_credential_fai
             .run
             .claims
             .iter()
-            .all(|claim| claim.issue_url.as_deref() == Some(EXACT_TRACKER_URL))
+            .all(|claim| claim.issue_url.as_deref() != Some(EXACT_TRACKER_URL))
     );
     assert!(
         started
@@ -323,13 +326,17 @@ async fn automation_start_and_refresh_project_one_durable_missing_credential_fai
             .map(|error| error.text.as_str()),
         Some("re-resolve the referenced Linear credential, then retry")
     );
-    let durable = store.load()?;
+    let mut durable = store.load()?;
     assert_eq!(
         durable.coordination.error.as_deref(),
         Some("re-resolve the referenced Linear credential, then retry")
     );
     assert_eq!(durable.coordination.dispatch_intent.as_ref(), Some(&intent));
     assert!(durable.claims.contains_key(&intent.claim_id));
+    durable
+        .claims
+        .retain(|claim_id, _claim| claim_id == &intent.claim_id);
+    store.save(&mut durable)?;
 
     let refreshed: AutomationRunResponse = rpc(
         &mut app_server,
@@ -342,14 +349,15 @@ async fn automation_start_and_refresh_project_one_durable_missing_credential_fai
     )
     .await?;
     assert_eq!(refreshed.run.run_id, recovered.run_id);
-    assert_eq!(refreshed.run.claims_total, 26);
-    assert_eq!(refreshed.run.claims.len(), 25);
-    assert!(
+    assert_eq!(refreshed.run.claims_total, 1);
+    assert_eq!(refreshed.run.claims.len(), 1);
+    assert_eq!(
         refreshed
             .run
             .claims
-            .iter()
-            .all(|claim| claim.issue_url.as_deref() == Some(EXACT_TRACKER_URL))
+            .first()
+            .map(|claim| (&claim.claim_id, claim.issue_url.as_deref())),
+        Some((&intent.claim_id, Some(EXACT_TRACKER_URL)))
     );
     assert_eq!(
         refreshed

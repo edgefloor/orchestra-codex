@@ -98,8 +98,7 @@ pub struct AutomationRunParams {
 pub struct AutomationStatusParams {
     pub thread_id: String,
     pub run_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional = nullable)]
     pub focused_issue_id: Option<String>,
 }
 
@@ -436,8 +435,6 @@ pub struct AutomationIssueClaimProjection {
     pub issue_id: String,
     pub issue_identifier: String,
     pub issue_title: OrchestraBoundedText,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub issue_url: Option<String>,
     pub tracker_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -955,6 +952,10 @@ mod automation_protocol_tests {
         }))
         .unwrap();
         assert_eq!(legacy.focused_issue_id, None);
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap()["focusedIssueId"],
+            serde_json::Value::Null
+        );
         assert!(serde_json::from_value::<AutomationRunParams>(status).is_err());
     }
 
@@ -1026,6 +1027,7 @@ mod automation_protocol_tests {
         };
 
         let absent = serde_json::to_value(claim(None, None)).unwrap();
+        assert_eq!(absent["issueUrl"], serde_json::Value::Null);
         assert!(absent.get("latestSteeringReceipt").is_none());
         assert!(absent.get("scheduledRetry").is_none());
         let legacy: AutomationIssueClaimProjection = serde_json::from_value(absent).unwrap();

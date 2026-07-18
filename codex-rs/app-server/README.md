@@ -155,6 +155,8 @@ Example with notification opt-out:
 - `thread/goal/clear` — clear the current persisted goal for a materialized thread; returns whether a goal was removed and emits `thread/goal/cleared` when state changes.
 - `thread/goal/updated` — notification emitted whenever a thread goal changes; includes the full current goal.
 - `thread/goal/cleared` — notification emitted whenever a thread goal is removed.
+- `automation/status` — read a native Symphony Automation Root Run. Pass optional `focusedIssueId` when a client needs one exact issue claim included even if that claim falls outside the ordinary bounded preview. The response still contains at most 25 claims, does not duplicate the focused claim, and preserves the ordinary preview when the issue is absent. Every projected claim includes `issueUrl`; it is the tracker-provided URL when known and `null` otherwise.
+- `automation/steerIssue` — deliver guidance to one exact claimed issue. Its response includes that claim by `claimId` even when it falls outside the ordinary bounded preview, while preserving the same 25-claim cap and returning the durable steering receipt.
 - `thread/settings/updated` — experimental notification emitted to subscribed clients when a loaded thread’s effective next-turn settings change; includes `threadId` and the full `threadSettings`.
 - `thread/status/changed` — notification emitted when a loaded thread’s status changes (`threadId` + new `status`).
 - `thread/archive` — move a thread’s rollout file into the archived directory and attempt to move any spawned descendant thread rollout files; returns `{}` on success and emits `thread/archived` for each archived thread.

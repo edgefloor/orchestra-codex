@@ -138,6 +138,7 @@ impl OrchestraRequestProcessor {
         &self,
         params: AutomationSteerIssueParams,
     ) -> Result<AutomationSteerIssueResponse, JSONRPCErrorError> {
+        let focused_claim_id = params.claim_id.clone();
         self.service
             .steer_automation_issue(
                 &params.thread_id,
@@ -147,7 +148,10 @@ impl OrchestraRequestProcessor {
             )
             .await
             .map(|(run, receipt)| AutomationSteerIssueResponse {
-                run: project_automation_run(run, None),
+                run: project_automation_run(
+                    run,
+                    Some(AutomationClaimFocus::ClaimId(&focused_claim_id)),
+                ),
                 receipt: project_automation_steering_receipt(receipt),
             })
             .map_err(orchestra_error)
@@ -250,7 +254,13 @@ impl OrchestraRequestProcessor {
             .automation_status(&params.thread_id, &params.run_id)
             .await
             .map(|run| AutomationRunResponse {
-                run: project_automation_run(run, params.focused_issue_id.as_deref()),
+                run: project_automation_run(
+                    run,
+                    params
+                        .focused_issue_id
+                        .as_deref()
+                        .map(AutomationClaimFocus::IssueId),
+                ),
             })
             .map_err(orchestra_error)
     }
@@ -480,20 +490,27 @@ fn project_automation_issue(issue: core::AutomationIssue) -> protocol::Automatio
     }
 }
 
+#[derive(Clone, Copy)]
+enum AutomationClaimFocus<'a> {
+    ClaimId(&'a str),
+    IssueId(&'a str),
+}
+
 fn project_automation_run(
     mut checkpoint: core::AutomationRootCheckpoint,
-    focused_issue_id: Option<&str>,
+    focused_claim: Option<AutomationClaimFocus<'_>>,
 ) -> protocol::AutomationRunProjection {
     let queue_counts = core::automation_queue_counts(&checkpoint);
     let claims_total = checkpoint.claims.len() as u32;
     let mut claims = std::mem::take(&mut checkpoint.claims);
-    let focused_claim = focused_issue_id
-        .and_then(|issue_id| {
-            claims
-                .values()
-                .find(|claim| claim.issue_id == issue_id)
-                .map(|claim| claim.claim_id.clone())
+    let focused_claim = focused_claim
+        .and_then(|focus| match focus {
+            AutomationClaimFocus::ClaimId(claim_id) => claims.get(claim_id),
+            AutomationClaimFocus::IssueId(issue_id) => {
+                claims.values().find(|claim| claim.issue_id == issue_id)
+            }
         })
+        .map(|claim| claim.claim_id.clone())
         .and_then(|claim_id| claims.remove(&claim_id));
     let visible_claim_limit =
         MAX_AUTOMATION_RUN_PROJECTION_CLAIMS - usize::from(focused_claim.is_some());
@@ -1957,9 +1974,15 @@ Implement {{ issue.identifier }}: {{ issue.title }}
                 .iter()
                 .all(|claim| claim.issue_id != "linear-42")
         );
-        let missing_focus = project_automation_run(focused_root.clone(), Some("missing-issue"));
+        let missing_focus = project_automation_run(
+            focused_root.clone(),
+            Some(AutomationClaimFocus::IssueId("missing-issue")),
+        );
         assert_eq!(missing_focus.claims, unfocused.claims);
-        let focused = project_automation_run(focused_root, Some("linear-42"));
+        let focused = project_automation_run(
+            focused_root.clone(),
+            Some(AutomationClaimFocus::IssueId("linear-42")),
+        );
         assert_eq!(focused.claims.len(), 25);
         assert_eq!(
             focused
@@ -1974,6 +1997,26 @@ Implement {{ issue.identifier }}: {{ issue.title }}
                 .claims
                 .iter()
                 .find(|claim| claim.issue_id == "linear-42")
+                .and_then(|claim| claim.issue_url.as_deref()),
+            Some("https://linear.app/orchestra/issue/ORC-42")
+        );
+
+        let steered =
+            project_automation_run(focused_root, Some(AutomationClaimFocus::ClaimId(&claim_id)));
+        assert_eq!(steered.claims.len(), 25);
+        assert_eq!(
+            steered
+                .claims
+                .iter()
+                .filter(|claim| claim.claim_id == claim_id)
+                .count(),
+            1
+        );
+        assert_eq!(
+            steered
+                .claims
+                .iter()
+                .find(|claim| claim.claim_id == claim_id)
                 .and_then(|claim| claim.issue_url.as_deref()),
             Some("https://linear.app/orchestra/issue/ORC-42")
         );
