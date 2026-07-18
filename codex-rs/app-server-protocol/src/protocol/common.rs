@@ -692,7 +692,7 @@ client_request_definitions! {
         response: v2::AutomationQueueReadResponse,
     },
     AutomationStatus => "automation/status" {
-        params: v2::AutomationRunParams,
+        params: v2::AutomationStatusParams,
         serialization: thread_id(params.thread_id),
         manual_payload_conversion: manual,
         response: v2::AutomationRunResponse,

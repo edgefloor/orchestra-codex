@@ -5,9 +5,9 @@ use app_test_support::to_response;
 use codex_app_server_protocol::AutomationDispatchIntentStatus;
 use codex_app_server_protocol::AutomationIssue as ProtocolAutomationIssue;
 use codex_app_server_protocol::AutomationReconcileParams;
-use codex_app_server_protocol::AutomationRunParams;
 use codex_app_server_protocol::AutomationRunResponse;
 use codex_app_server_protocol::AutomationStartParams;
+use codex_app_server_protocol::AutomationStatusParams;
 use codex_app_server_protocol::AutomationValidateParams;
 use codex_app_server_protocol::AutomationValidateResponse;
 use codex_app_server_protocol::JSONRPCResponse;
@@ -31,6 +31,8 @@ use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const MISSING_LINEAR_KEY: &str = "ORCHESTRA_TEST_MISSING_LINEAR_KEY";
+const EXACT_TRACKER_URL: &str =
+    "https://linear.app/orchestra/issue/ORC-CYCLE-5/non-derivable-slug?source=tracker";
 
 fn workflow_document() -> String {
     format!(
@@ -84,7 +86,7 @@ fn fixture_issue() -> ProtocolAutomationIssue {
         priority: Some(1),
         state: "Todo".into(),
         branch_name: None,
-        url: None,
+        url: Some(EXACT_TRACKER_URL.into()),
         labels: vec!["automation".into()],
         blocked_by: Vec::new(),
         created_at: Some("2026-07-18T00:00:00.000Z".into()),
@@ -181,7 +183,7 @@ async fn automation_start_and_refresh_project_one_durable_missing_credential_fai
         priority: Some(1),
         state: "Todo".into(),
         branch_name: None,
-        url: None,
+        url: Some(EXACT_TRACKER_URL.into()),
         labels: vec!["automation".into()],
         blocked_by: Vec::new(),
         created_at: Some("2026-07-18T00:00:00.000Z".into()),
@@ -211,6 +213,21 @@ async fn automation_start_and_refresh_project_one_durable_missing_credential_fai
         .commit_coordination_plan(&mut root, &profile, plan)?
         .dispatch_intent
         .context("coordination plan did not create a dispatch intent")?;
+    let focused_issue_id = core_issue.id.clone();
+    let seed_claim = root.claims[&intent.claim_id].clone();
+    for index in 0..25 {
+        let mut filler = seed_claim.clone();
+        filler.claim_id = format!("{index:05}");
+        filler.issue_id = format!("filler-issue-{index:02}");
+        filler.issue_identifier = format!("ORC-FILLER-{index:02}");
+        root.claims.insert(filler.claim_id.clone(), filler);
+    }
+    store.save(&mut root)?;
+    let durable = store.load()?;
+    assert_eq!(
+        durable.claims[&intent.claim_id].issue_url.as_deref(),
+        Some(EXACT_TRACKER_URL)
+    );
 
     let started: AutomationRunResponse = rpc(
         &mut app_server,
@@ -228,8 +245,22 @@ async fn automation_start_and_refresh_project_one_durable_missing_credential_fai
         .as_ref()
         .context("automation/start omitted the outstanding intent")?;
     assert_eq!(started.run.run_id, root.run_id);
-    assert_eq!(started.run.claims_total, 1);
-    assert_eq!(started.run.claims.len(), 1);
+    assert_eq!(started.run.claims_total, 26);
+    assert_eq!(started.run.claims.len(), 25);
+    assert!(
+        started
+            .run
+            .claims
+            .iter()
+            .all(|claim| claim.issue_url.as_deref() == Some(EXACT_TRACKER_URL))
+    );
+    assert!(
+        started
+            .run
+            .claims
+            .iter()
+            .all(|claim| claim.issue_id != focused_issue_id)
+    );
     assert_eq!(started_intent.intent_id, intent.intent_id);
     assert_eq!(started_intent.claim_id, intent.claim_id);
     assert_eq!(
@@ -242,9 +273,10 @@ async fn automation_start_and_refresh_project_one_durable_missing_credential_fai
         let status: AutomationRunResponse = rpc(
             &mut app_server,
             "automation/status",
-            AutomationRunParams {
+            AutomationStatusParams {
                 thread_id: thread.thread.id.clone(),
                 run_id: root.run_id.clone(),
+                focused_issue_id: Some(focused_issue_id.clone()),
             },
         )
         .await?;
@@ -264,9 +296,19 @@ async fn automation_start_and_refresh_project_one_durable_missing_credential_fai
         .as_ref()
         .context("durable error displaced the outstanding intent")?;
     assert_eq!(recovered.run_id, started.run.run_id);
-    assert_eq!(recovered.claims_total, 1);
-    assert_eq!(recovered.claims.len(), 1);
-    assert_eq!(recovered.claims[0].claim_id, intent.claim_id);
+    assert_eq!(recovered.claims_total, 26);
+    assert_eq!(recovered.claims.len(), 25);
+    let focused_claims = recovered
+        .claims
+        .iter()
+        .filter(|claim| claim.issue_id == focused_issue_id)
+        .collect::<Vec<_>>();
+    assert_eq!(focused_claims.len(), 1);
+    assert_eq!(focused_claims[0].claim_id, intent.claim_id);
+    assert_eq!(
+        focused_claims[0].issue_url.as_deref(),
+        Some(EXACT_TRACKER_URL)
+    );
     assert_eq!(recovered_intent.intent_id, intent.intent_id);
     assert_eq!(recovered_intent.claim_id, intent.claim_id);
     assert_eq!(
@@ -300,8 +342,15 @@ async fn automation_start_and_refresh_project_one_durable_missing_credential_fai
     )
     .await?;
     assert_eq!(refreshed.run.run_id, recovered.run_id);
-    assert_eq!(refreshed.run.claims_total, 1);
-    assert_eq!(refreshed.run.claims.len(), 1);
+    assert_eq!(refreshed.run.claims_total, 26);
+    assert_eq!(refreshed.run.claims.len(), 25);
+    assert!(
+        refreshed
+            .run
+            .claims
+            .iter()
+            .all(|claim| claim.issue_url.as_deref() == Some(EXACT_TRACKER_URL))
+    );
     assert_eq!(
         refreshed
             .run

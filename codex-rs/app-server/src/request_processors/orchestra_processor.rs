@@ -10,6 +10,7 @@ use codex_app_server_protocol::AutomationRunFixtureParams;
 use codex_app_server_protocol::AutomationRunParams;
 use codex_app_server_protocol::AutomationRunResponse;
 use codex_app_server_protocol::AutomationStartParams;
+use codex_app_server_protocol::AutomationStatusParams;
 use codex_app_server_protocol::AutomationSteerIssueParams;
 use codex_app_server_protocol::AutomationSteerIssueResponse;
 use codex_app_server_protocol::AutomationValidateParams;
@@ -36,6 +37,8 @@ use codex_app_server_protocol::OrchestraValidateResponse;
 use codex_app_server_protocol::OrchestraWorkflowPlan;
 use codex_app_server_protocol::OrchestraWorkflowStep;
 use codex_orchestra_core as core;
+
+const MAX_AUTOMATION_RUN_PROJECTION_CLAIMS: usize = 25;
 use codex_orchestra_core::Action;
 use codex_orchestra_core::EvidenceAvailability;
 use codex_orchestra_core::EvidenceKind;
@@ -113,7 +116,7 @@ impl OrchestraRequestProcessor {
             )
             .await
             .map(|run| AutomationRunResponse {
-                run: project_automation_run(run),
+                run: project_automation_run(run, None),
             })
             .map_err(orchestra_error)
     }
@@ -126,7 +129,7 @@ impl OrchestraRequestProcessor {
             .start_automation(&params.thread_id, &params.profile_path)
             .await
             .map(|run| AutomationRunResponse {
-                run: project_automation_run(run),
+                run: project_automation_run(run, None),
             })
             .map_err(orchestra_error)
     }
@@ -144,7 +147,7 @@ impl OrchestraRequestProcessor {
             )
             .await
             .map(|(run, receipt)| AutomationSteerIssueResponse {
-                run: project_automation_run(run),
+                run: project_automation_run(run, None),
                 receipt: project_automation_steering_receipt(receipt),
             })
             .map_err(orchestra_error)
@@ -221,7 +224,7 @@ impl OrchestraRequestProcessor {
             .cancel_automation(&params.thread_id, &params.run_id)
             .await
             .map(|run| AutomationRunResponse {
-                run: project_automation_run(run),
+                run: project_automation_run(run, None),
             })
             .map_err(orchestra_error)
     }
@@ -234,20 +237,20 @@ impl OrchestraRequestProcessor {
             .cancel_automation_issue(&params.thread_id, &params.run_id, &params.claim_id)
             .await
             .map(|run| AutomationRunResponse {
-                run: project_automation_run(run),
+                run: project_automation_run(run, None),
             })
             .map_err(orchestra_error)
     }
 
     pub(crate) async fn automation_status(
         &self,
-        params: AutomationRunParams,
+        params: AutomationStatusParams,
     ) -> Result<AutomationRunResponse, JSONRPCErrorError> {
         self.service
             .automation_status(&params.thread_id, &params.run_id)
             .await
             .map(|run| AutomationRunResponse {
-                run: project_automation_run(run),
+                run: project_automation_run(run, params.focused_issue_id.as_deref()),
             })
             .map_err(orchestra_error)
     }
@@ -260,7 +263,7 @@ impl OrchestraRequestProcessor {
             .pause_automation(&params.thread_id, &params.run_id)
             .await
             .map(|run| AutomationRunResponse {
-                run: project_automation_run(run),
+                run: project_automation_run(run, None),
             })
             .map_err(orchestra_error)
     }
@@ -273,7 +276,7 @@ impl OrchestraRequestProcessor {
             .refresh_automation(&params.thread_id, &params.run_id, &params.profile_path)
             .await
             .map(|run| AutomationRunResponse {
-                run: project_automation_run(run),
+                run: project_automation_run(run, None),
             })
             .map_err(orchestra_error)
     }
@@ -291,7 +294,7 @@ impl OrchestraRequestProcessor {
             )
             .await
             .map(|run| AutomationRunResponse {
-                run: project_automation_run(run),
+                run: project_automation_run(run, None),
             })
             .map_err(orchestra_error)
     }
@@ -478,10 +481,27 @@ fn project_automation_issue(issue: core::AutomationIssue) -> protocol::Automatio
 }
 
 fn project_automation_run(
-    checkpoint: core::AutomationRootCheckpoint,
+    mut checkpoint: core::AutomationRootCheckpoint,
+    focused_issue_id: Option<&str>,
 ) -> protocol::AutomationRunProjection {
     let queue_counts = core::automation_queue_counts(&checkpoint);
     let claims_total = checkpoint.claims.len() as u32;
+    let mut claims = std::mem::take(&mut checkpoint.claims);
+    let focused_claim = focused_issue_id
+        .and_then(|issue_id| {
+            claims
+                .values()
+                .find(|claim| claim.issue_id == issue_id)
+                .map(|claim| claim.claim_id.clone())
+        })
+        .and_then(|claim_id| claims.remove(&claim_id));
+    let visible_claim_limit =
+        MAX_AUTOMATION_RUN_PROJECTION_CLAIMS - usize::from(focused_claim.is_some());
+    let projected_claims = claims
+        .into_values()
+        .take(visible_claim_limit)
+        .chain(focused_claim)
+        .collect::<Vec<_>>();
     let categories = [
         core::AutomationQueueCategory::Queued,
         core::AutomationQueueCategory::Running,
@@ -628,15 +648,14 @@ fn project_automation_run(
             terminal: queue_counts.terminal,
         },
         claims_total,
-        claims: checkpoint
-            .claims
-            .into_values()
-            .take(25)
+        claims: projected_claims
+            .into_iter()
             .map(|claim| protocol::AutomationIssueClaimProjection {
                 claim_id: claim.claim_id,
                 issue_id: claim.issue_id,
                 issue_identifier: claim.issue_identifier,
                 issue_title: automation_bounded_text(claim.issue_title),
+                issue_url: claim.issue_url,
                 tracker_state: claim.tracker_state,
                 priority: claim.priority,
                 attempt: claim.attempt,
@@ -1884,7 +1903,16 @@ Implement {{ issue.identifier }}: {{ issue.title }}
             .complete_dispatch_intent(&mut root, &intent.intent_id)
             .unwrap();
 
-        let projection = project_automation_run(root);
+        let mut focused_root = root.clone();
+        let seed_claim = focused_root.claims[&claim_id].clone();
+        for index in 0..25 {
+            let mut filler = seed_claim.clone();
+            filler.claim_id = format!("{index:05}");
+            filler.issue_id = format!("filler-issue-{index:02}");
+            filler.issue_identifier = format!("ORC-FILLER-{index:02}");
+            focused_root.claims.insert(filler.claim_id.clone(), filler);
+        }
+        let projection = project_automation_run(root, None);
         let claim = &projection.claims[0];
         assert_eq!(projection.owner_thread_id, "automation-task-42");
         assert_eq!(projection.coordination.scan_revision, 1);
@@ -1919,5 +1947,35 @@ Implement {{ issue.identifier }}: {{ issue.title }}
         assert!(!desktop_payload.contains(RAW_CHILD_DETAIL));
         assert!(!desktop_payload.contains("FIRST_STEERING_MUST_NOT_REACH"));
         assert!(!desktop_payload.contains("tracker_comment"));
+
+        let unfocused = project_automation_run(focused_root.clone(), None);
+        assert_eq!(unfocused.claims_total, 26);
+        assert_eq!(unfocused.claims.len(), 25);
+        assert!(
+            unfocused
+                .claims
+                .iter()
+                .all(|claim| claim.issue_id != "linear-42")
+        );
+        let missing_focus = project_automation_run(focused_root.clone(), Some("missing-issue"));
+        assert_eq!(missing_focus.claims, unfocused.claims);
+        let focused = project_automation_run(focused_root, Some("linear-42"));
+        assert_eq!(focused.claims.len(), 25);
+        assert_eq!(
+            focused
+                .claims
+                .iter()
+                .filter(|claim| claim.issue_id == "linear-42")
+                .count(),
+            1
+        );
+        assert_eq!(
+            focused
+                .claims
+                .iter()
+                .find(|claim| claim.issue_id == "linear-42")
+                .and_then(|claim| claim.issue_url.as_deref()),
+            Some("https://linear.app/orchestra/issue/ORC-42")
+        );
     }
 }

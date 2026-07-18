@@ -400,6 +400,12 @@
         "issueTitle": {
           "$ref": "#/definitions/OrchestraBoundedText"
         },
+        "issueUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "lastProgressAtMs": {
           "format": "uint64",
           "minimum": 0.0,

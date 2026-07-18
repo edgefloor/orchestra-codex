@@ -460,6 +460,28 @@
       ],
       "type": "object"
     },
+    "AutomationStatusParams": {
+      "additionalProperties": false,
+      "properties": {
+        "focusedIssueId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "AutomationSteerIssueParams": {
       "additionalProperties": false,
       "properties": {
@@ -6048,7 +6070,7 @@
           "type": "string"
         },
         "params": {
-          "$ref": "#/definitions/AutomationRunParams"
+          "$ref": "#/definitions/AutomationStatusParams"
         }
       },
       "required": [

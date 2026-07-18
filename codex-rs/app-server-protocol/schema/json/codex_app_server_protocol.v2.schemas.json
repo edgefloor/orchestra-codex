@@ -1802,6 +1802,12 @@
         "issueTitle": {
           "$ref": "#/definitions/OrchestraBoundedText"
         },
+        "issueUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "lastProgressAtMs": {
           "format": "uint64",
           "minimum": 0.0,
@@ -2591,6 +2597,30 @@
         "threadId"
       ],
       "title": "AutomationStartParams",
+      "type": "object"
+    },
+    "AutomationStatusParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "focusedIssueId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "threadId"
+      ],
+      "title": "AutomationStatusParams",
       "type": "object"
     },
     "AutomationSteerIssueParams": {
@@ -3678,7 +3708,7 @@
               "type": "string"
             },
             "params": {
-              "$ref": "#/definitions/AutomationRunParams"
+              "$ref": "#/definitions/AutomationStatusParams"
             }
           },
           "required": [

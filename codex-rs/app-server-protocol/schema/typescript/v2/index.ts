@@ -86,6 +86,7 @@ export type { AutomationRunResponse } from "./AutomationRunResponse";
 export type { AutomationSecretKind } from "./AutomationSecretKind";
 export type { AutomationSecretReference } from "./AutomationSecretReference";
 export type { AutomationStartParams } from "./AutomationStartParams";
+export type { AutomationStatusParams } from "./AutomationStatusParams";
 export type { AutomationSteerIssueParams } from "./AutomationSteerIssueParams";
 export type { AutomationSteerIssueResponse } from "./AutomationSteerIssueResponse";
 export type { AutomationSteeringReceipt } from "./AutomationSteeringReceipt";

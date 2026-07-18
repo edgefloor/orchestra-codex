@@ -1,13 +1,24 @@
-use crate::{AgentHandle, AutomationEffect, AutomationIssue, AutomationProfile, RunStatus};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use crate::AgentHandle;
+use crate::AutomationEffect;
+use crate::AutomationIssue;
+use crate::AutomationProfile;
+use crate::RunStatus;
+use serde::Deserialize;
+use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
+use std::fs::{self};
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::Component;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -319,6 +330,8 @@ pub struct AutomationIssueClaim {
     pub issue_id: String,
     pub issue_identifier: String,
     pub issue_title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_url: Option<String>,
     #[serde(default)]
     pub tracker_state: String,
     #[serde(default)]
@@ -1274,6 +1287,7 @@ impl AutomationRunStore {
         checkpoint.queue.clear();
         for claim in checkpoint.claims.values_mut() {
             if let Some(issue) = observations.get(&claim.issue_id) {
+                claim.issue_url = issue.url.clone();
                 claim.tracker_state = issue.state.clone();
                 if is_terminal_state(profile, &issue.state) && claim_is_active(claim.status) {
                     claim.next_action =
@@ -1769,6 +1783,7 @@ impl AutomationRunStore {
                 claim.next_action = "refresh tracker state before dispatch".into();
                 continue;
             };
+            claim.issue_url = issue.url.clone();
             claim.tracker_state = issue.state.clone();
             claim.priority = issue.priority;
             let Some(observation) = observed.get(claim.claim_id.as_str()) else {
@@ -3049,6 +3064,7 @@ fn prepare_automation_claim(
         issue_id: issue.id.clone(),
         issue_identifier: issue.identifier.clone(),
         issue_title: issue.title.clone(),
+        issue_url: issue.url.clone(),
         tracker_state: issue.state.clone(),
         priority: issue.priority,
         attempt,
@@ -3362,12 +3378,18 @@ fn is_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        AutomationAgentProfile, AutomationCodexPolicy, AutomationEffect, AutomationHooksProfile,
-        AutomationOrchestraProfile, AutomationPollingProfile, AutomationSecretKind,
-        AutomationSecretReference, AutomationTrackerProfile, AutomationWorkspaceProfile,
-    };
-    use serde_json::{Value, json};
+    use crate::AutomationAgentProfile;
+    use crate::AutomationCodexPolicy;
+    use crate::AutomationEffect;
+    use crate::AutomationHooksProfile;
+    use crate::AutomationOrchestraProfile;
+    use crate::AutomationPollingProfile;
+    use crate::AutomationSecretKind;
+    use crate::AutomationSecretReference;
+    use crate::AutomationTrackerProfile;
+    use crate::AutomationWorkspaceProfile;
+    use serde_json::Value;
+    use serde_json::json;
     use tempfile::tempdir;
 
     fn profile(workspace: &Path) -> AutomationProfile {
@@ -3560,6 +3582,42 @@ mod tests {
         .unwrap();
         assert_eq!(suspended_checkpoint.run_id, checkpoint.run_id);
         assert_eq!(suspended_checkpoint.status, AutomationRootStatus::Suspended);
+    }
+
+    #[test]
+    fn issue_claim_persists_exact_tracker_url_and_legacy_checkpoint_defaults_to_none() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let profile = profile(workspace.path());
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (store, mut checkpoint) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-issue-url",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let exact_url = "https://linear.app/orchestra/issue/ORC-33/run-fixture?source=tracker";
+        let mut tracked_issue = issue();
+        tracked_issue.url = Some(exact_url.into());
+
+        let claim_id = store
+            .claim_fixture(&mut checkpoint, &tracked_issue, 1)
+            .unwrap();
+        let persisted = store.load().unwrap();
+        assert_eq!(
+            persisted.claims[&claim_id].issue_url.as_deref(),
+            Some(exact_url)
+        );
+
+        let mut legacy_json = serde_json::to_value(&persisted).unwrap();
+        legacy_json["claims"][&claim_id]
+            .as_object_mut()
+            .unwrap()
+            .remove("issueUrl");
+        let legacy: AutomationRootCheckpoint = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(legacy.claims[&claim_id].issue_url, None);
     }
 
     #[test]
@@ -3806,7 +3864,8 @@ mod tests {
         })
         .unwrap();
 
-        let urgent = queued_issue("issue-1", "ORC-1", "Todo", Some(1));
+        let mut urgent = queued_issue("issue-1", "ORC-1", "Todo", Some(1));
+        urgent.url = Some("https://linear.app/orchestra/issue/ORC-1/initial".into());
         let later_same_state = queued_issue("issue-2", "ORC-2", "Todo", Some(2));
         let other_state = queued_issue("issue-3", "ORC-3", "In Progress", Some(3));
         let mut blocked = queued_issue("issue-4", "ORC-4", "Todo", Some(0));
@@ -3856,6 +3915,16 @@ mod tests {
             .map(|claim_id| checkpoint.claims[claim_id].issue_identifier.as_str())
             .collect::<Vec<_>>();
         assert_eq!(claimed, ["ORC-1", "ORC-3"]);
+        assert_eq!(
+            checkpoint
+                .claims
+                .values()
+                .find(|claim| claim.issue_id == "issue-1")
+                .unwrap()
+                .issue_url
+                .as_deref(),
+            Some("https://linear.app/orchestra/issue/ORC-1/initial")
+        );
         assert_eq!(
             result.counts,
             AutomationQueueCounts {
@@ -3910,6 +3979,7 @@ mod tests {
         );
 
         let mut externally_done = queued_issue("issue-1", "ORC-1", "Done", Some(1));
+        externally_done.url = Some("https://linear.app/orchestra/issue/ORC-1/refreshed".into());
         externally_done.updated_at = Some("2026-07-17T00:00:00Z".into());
         let reconciled = store
             .coordinate_fixture(
@@ -3926,6 +3996,10 @@ mod tests {
             .find(|claim| claim.issue_id == "issue-1")
             .unwrap();
         assert_eq!(urgent_claim.tracker_state, "Done");
+        assert_eq!(
+            urgent_claim.issue_url.as_deref(),
+            Some("https://linear.app/orchestra/issue/ORC-1/refreshed")
+        );
         assert_eq!(
             urgent_claim.next_action,
             "reconcile externally terminal tracker state before dispatch"
@@ -5476,7 +5550,9 @@ mod tests {
             profile_digest: &digest,
         })
         .unwrap();
-        let claim_id = store.claim_fixture(&mut root, &issue(), 1).unwrap();
+        let mut tracked_issue = issue();
+        tracked_issue.url = Some("https://linear.app/orchestra/issue/ORC-33/initial".into());
+        let claim_id = store.claim_fixture(&mut root, &tracked_issue, 1).unwrap();
         let retained_worktree = root.claims[&claim_id].worktree.clone();
         fs::create_dir_all(&retained_worktree).unwrap();
         let retained_run_id = "child-run-1".to_owned();
@@ -5492,11 +5568,13 @@ mod tests {
 
         store.pause(&mut root, "desktop pause").unwrap();
         store.begin_reconciliation(&mut root).unwrap();
+        let mut refreshed_issue = issue();
+        refreshed_issue.url = Some("https://linear.app/orchestra/issue/ORC-33/refreshed".into());
         store
             .reconcile(
                 &mut root,
                 &profile,
-                &[issue()],
+                &[refreshed_issue],
                 &[AutomationClaimReconciliation {
                     claim_id: claim_id.clone(),
                     issue_task_active: true,
@@ -5517,11 +5595,16 @@ mod tests {
             root.claims[&claim_id].workflow_run_id.as_deref(),
             Some(retained_run_id.as_str())
         );
+        assert_eq!(
+            root.claims[&claim_id].issue_url.as_deref(),
+            Some("https://linear.app/orchestra/issue/ORC-33/refreshed")
+        );
 
         store.pause(&mut root, "tracker refresh").unwrap();
         store.begin_reconciliation(&mut root).unwrap();
         let mut terminal = issue();
         terminal.state = "Done".into();
+        terminal.url = Some("https://linear.app/orchestra/issue/ORC-33/terminal".into());
         let blocked = store.reconcile(
             &mut root,
             &profile,
@@ -5540,6 +5623,10 @@ mod tests {
         ));
         assert_eq!(root.status, AutomationRootStatus::Suspended);
         assert_eq!(root.reconciliation, AutomationReconciliationStatus::Blocked);
+        assert_eq!(
+            root.claims[&claim_id].issue_url.as_deref(),
+            Some("https://linear.app/orchestra/issue/ORC-33/terminal")
+        );
 
         store.begin_reconciliation(&mut root).unwrap();
         store

@@ -95,6 +95,17 @@ pub struct AutomationRunParams {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export_to = "v2/")]
+pub struct AutomationStatusParams {
+    pub thread_id: String,
+    pub run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub focused_issue_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
 pub struct AutomationCancelIssueParams {
     pub thread_id: String,
     pub run_id: String,
@@ -425,6 +436,9 @@ pub struct AutomationIssueClaimProjection {
     pub issue_id: String,
     pub issue_identifier: String,
     pub issue_title: OrchestraBoundedText,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub issue_url: Option<String>,
     pub tracker_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -926,6 +940,25 @@ mod automation_protocol_tests {
     }
 
     #[test]
+    fn automation_status_focus_is_optional_while_shared_lifecycle_params_stay_strict() {
+        let status = serde_json::to_value(AutomationStatusParams {
+            thread_id: "thread-1".into(),
+            run_id: "automation-1".into(),
+            focused_issue_id: Some("issue-42".into()),
+        })
+        .unwrap();
+        assert_eq!(status["focusedIssueId"], "issue-42");
+
+        let legacy: AutomationStatusParams = serde_json::from_value(serde_json::json!({
+            "threadId": "thread-1",
+            "runId": "automation-1"
+        }))
+        .unwrap();
+        assert_eq!(legacy.focused_issue_id, None);
+        assert!(serde_json::from_value::<AutomationRunParams>(status).is_err());
+    }
+
+    #[test]
     fn automation_optional_fields_are_omitted_instead_of_serialized_as_null() {
         let hooks = serde_json::to_value(AutomationHooksProfile {
             after_create: None,
@@ -960,6 +993,7 @@ mod automation_protocol_tests {
                 text: "Validate Automation".into(),
                 truncated: false,
             },
+            issue_url: None,
             tracker_state: "Todo".into(),
             priority: None,
             attempt: 1,
@@ -995,6 +1029,7 @@ mod automation_protocol_tests {
         assert!(absent.get("latestSteeringReceipt").is_none());
         assert!(absent.get("scheduledRetry").is_none());
         let legacy: AutomationIssueClaimProjection = serde_json::from_value(absent).unwrap();
+        assert!(legacy.issue_url.is_none());
         assert!(legacy.scheduled_retry.is_none());
 
         let present = serde_json::to_value(claim(
