@@ -147,12 +147,8 @@ impl OrchestraRequestProcessor {
                 &params.input,
             )
             .await
-            .map(|(run, receipt)| AutomationSteerIssueResponse {
-                run: project_automation_run(
-                    run,
-                    Some(AutomationClaimFocus::ClaimId(&focused_claim_id)),
-                ),
-                receipt: project_automation_steering_receipt(receipt),
+            .map(|(run, receipt)| {
+                project_automation_steer_issue_response(run, receipt, &focused_claim_id)
             })
             .map_err(orchestra_error)
     }
@@ -870,6 +866,17 @@ fn project_automation_steering_receipt(
         },
         provider_receipt: receipt.provider_receipt,
         failure: receipt.failure,
+    }
+}
+
+fn project_automation_steer_issue_response(
+    run: core::AutomationRootCheckpoint,
+    receipt: core::AutomationSteeringReceipt,
+    focused_claim_id: &str,
+) -> AutomationSteerIssueResponse {
+    AutomationSteerIssueResponse {
+        run: project_automation_run(run, Some(AutomationClaimFocus::ClaimId(focused_claim_id))),
+        receipt: project_automation_steering_receipt(receipt),
     }
 }
 
@@ -2001,8 +2008,15 @@ Implement {{ issue.identifier }}: {{ issue.title }}
             Some("https://linear.app/orchestra/issue/ORC-42")
         );
 
-        let steered =
-            project_automation_run(focused_root, Some(AutomationClaimFocus::ClaimId(&claim_id)));
+        let steering_receipt = focused_root.claims[&claim_id]
+            .steering_receipts
+            .iter()
+            .max_by_key(|receipt| receipt.sequence)
+            .cloned()
+            .unwrap();
+        let response =
+            project_automation_steer_issue_response(focused_root, steering_receipt, &claim_id);
+        let steered = response.run;
         assert_eq!(steered.claims.len(), 25);
         assert_eq!(
             steered
@@ -2019,6 +2033,11 @@ Implement {{ issue.identifier }}: {{ issue.title }}
                 .find(|claim| claim.claim_id == claim_id)
                 .and_then(|claim| claim.issue_url.as_deref()),
             Some("https://linear.app/orchestra/issue/ORC-42")
+        );
+        assert_eq!(response.receipt.sequence, 2);
+        assert_eq!(
+            response.receipt.input_preview,
+            "Focus on the recovery test."
         );
     }
 }
