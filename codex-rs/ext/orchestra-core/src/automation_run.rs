@@ -14,6 +14,7 @@ use std::io::Write;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -21,6 +22,8 @@ use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static AUTOMATION_STATE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+const MAX_AUTOMATION_COORDINATION_PAGE_ISSUES: usize = 50;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -179,6 +182,113 @@ pub struct AutomationQueueCounts {
 #[serde(rename_all = "camelCase")]
 pub struct AutomationCoordinationResult {
     pub dispatched_claim_ids: Vec<String>,
+    pub counts: AutomationQueueCounts,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationCoordinationIntakeStatus {
+    #[default]
+    NotStarted,
+    Ready,
+    Skipped,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationDispatchIntentKind {
+    NewClaim,
+    Retry,
+    Continuation,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationDispatchIntentStatus {
+    #[default]
+    Pending,
+    Started,
+    Completed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationDispatchIntent {
+    pub intent_id: String,
+    pub claim_id: String,
+    pub issue_id: String,
+    pub kind: AutomationDispatchIntentKind,
+    pub status: AutomationDispatchIntentStatus,
+    pub attempt: u32,
+    pub profile_digest: String,
+    pub created_at_ms: u64,
+    pub ready_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationCoordinationCheckpoint {
+    pub cycle: u64,
+    pub scan_revision: u64,
+    pub input_cursor: Option<String>,
+    pub output_cursor: Option<String>,
+    pub intake_status: AutomationCoordinationIntakeStatus,
+    pub page_digest: Option<String>,
+    pub started_at_ms: Option<u64>,
+    pub completed_at_ms: Option<u64>,
+    pub error: Option<String>,
+    pub next_action: String,
+    pub dispatch_intent: Option<AutomationDispatchIntent>,
+}
+
+pub enum AutomationCoordinationPage<'a> {
+    Ready {
+        expected_scan_revision: u64,
+        input_cursor: Option<&'a str>,
+        output_cursor: Option<&'a str>,
+        issues: &'a [AutomationIssue],
+    },
+    Skipped {
+        expected_scan_revision: u64,
+        input_cursor: Option<&'a str>,
+        reason: &'a str,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum AutomationCoordinationSelection {
+    NewIssue(Box<AutomationIssue>),
+    DueClaim {
+        claim_id: String,
+        retry: AutomationRetrySchedule,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutomationCoordinationPlan {
+    expected_lease_epoch: u64,
+    expected_revision: u64,
+    dispatch_profile_digest: String,
+    dispatch_profile_revision: u64,
+    coordination: AutomationCoordinationCheckpoint,
+    queue: BTreeMap<String, AutomationQueueItem>,
+    tracker_states: BTreeMap<String, String>,
+    selection: Option<AutomationCoordinationSelection>,
+    replayed: bool,
+    task_prompt: Option<String>,
+}
+
+impl AutomationCoordinationPlan {
+    pub fn with_task_prompt(mut self, task_prompt: &str) -> Self {
+        self.task_prompt = Some(task_prompt.to_owned());
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutomationCoordinationCommit {
+    pub dispatch_intent: Option<AutomationDispatchIntent>,
+    pub replayed: bool,
     pub counts: AutomationQueueCounts,
 }
 
@@ -401,6 +511,8 @@ pub struct AutomationRootCheckpoint {
     pub status: AutomationRootStatus,
     #[serde(default)]
     pub reconciliation: AutomationReconciliationStatus,
+    #[serde(default)]
+    pub coordination: AutomationCoordinationCheckpoint,
     pub claims: BTreeMap<String, AutomationIssueClaim>,
     #[serde(default)]
     pub queue: BTreeMap<String, AutomationQueueItem>,
@@ -438,6 +550,26 @@ pub enum AutomationRunError {
     InactiveClaim(String),
     #[error("Automation claim `{0}` has no retry ready for dispatch")]
     RetryNotReady(String),
+    #[error("Automation coordination has an unconsumed dispatch intent `{0}`")]
+    PendingDispatchIntent(String),
+    #[error("Automation dispatch intent `{0}` was not found")]
+    MissingDispatchIntent(String),
+    #[error("Automation dispatch intent `{intent_id}` cannot transition from {actual:?}")]
+    InvalidDispatchIntentStatus {
+        intent_id: String,
+        actual: AutomationDispatchIntentStatus,
+    },
+    #[error(
+        "Automation coordination cursor is stale (expected scan revision {expected_scan_revision}, found {actual_scan_revision})"
+    )]
+    CoordinationCursorMismatch {
+        expected_scan_revision: u64,
+        actual_scan_revision: u64,
+    },
+    #[error("Automation coordination page changed while replaying cursor {input_cursor:?}")]
+    CoordinationPageConflict { input_cursor: Option<String> },
+    #[error("Automation coordination page contains {count} issues; the per-page limit is {limit}")]
+    CoordinationPageTooLarge { count: usize, limit: usize },
     #[error(
         "Automation lease is stale (expected epoch {expected_epoch} revision {expected_revision}, found epoch {actual_epoch} revision {actual_revision})"
     )]
@@ -561,7 +693,7 @@ impl AutomationRunStore {
             store.write_active_profile_snapshot(request.profile_digest, request.profile)
         {
             let _ = fs::remove_file(&store.lease_path);
-            return Err(error.into());
+            return Err(error);
         }
         let mut checkpoint = AutomationRootCheckpoint {
             schema_version: 1,
@@ -578,6 +710,7 @@ impl AutomationRunStore {
             revision: 0,
             status: AutomationRootStatus::Running,
             reconciliation: AutomationReconciliationStatus::Complete,
+            coordination: AutomationCoordinationCheckpoint::default(),
             claims: BTreeMap::new(),
             queue: BTreeMap::new(),
             next_action: "dispatch one eligible issue".into(),
@@ -740,61 +873,271 @@ impl AutomationRunStore {
         profile_digest: &str,
         profile_revision: u64,
     ) -> Result<String, AutomationRunError> {
-        if checkpoint
-            .claims
-            .values()
-            .any(|claim| claim.issue_id == issue.id)
-        {
-            return Err(AutomationRunError::DuplicateIssue(issue.identifier.clone()));
-        }
-        let claim_id = format!(
-            "claim-{}",
-            &sha256(format!("{}\0{attempt}", issue.id).as_bytes())[..16]
-        );
-        let workspace_root = canonical_or_lexical(&checkpoint.workspace_root)?;
-        let issue_hash = &sha256(issue.id.as_bytes())[..12];
-        let worktree = workspace_root.join(format!(
-            "{}-{issue_hash}-a{attempt}",
-            safe_segment(&issue.identifier)
-        ));
-        if !worktree.starts_with(&workspace_root) || worktree == workspace_root {
-            return Err(AutomationRunError::UnsafeWorkspace);
-        }
-        checkpoint.claims.insert(
-            claim_id.clone(),
-            AutomationIssueClaim {
-                claim_id: claim_id.clone(),
-                issue_id: issue.id.clone(),
-                issue_identifier: issue.identifier.clone(),
-                issue_title: issue.title.clone(),
-                tracker_state: issue.state.clone(),
-                priority: issue.priority,
-                attempt,
-                profile_digest: profile_digest.into(),
-                profile_revision,
-                task_prompt: String::new(),
-                workflow_invocations: 0,
-                turns_in_window: 0,
-                continuation_count: 0,
-                retry_attempt: 0,
-                last_progress_at_ms: None,
-                retry: None,
-                status: AutomationClaimStatus::Claimed,
-                worktree,
-                source_revision: checkpoint.source_revision.clone(),
-                issue_task: None,
-                workflow_run_id: None,
-                workflow_status: None,
-                effects: Vec::new(),
-                steering_receipts: Vec::new(),
-                hook_receipts: Vec::new(),
-                cleanup: AutomationCleanupState::default(),
-                next_action: "create persistent issue worktree and native Issue task".into(),
-            },
-        );
+        let claim =
+            prepare_automation_claim(checkpoint, issue, attempt, profile_digest, profile_revision)?;
+        let claim_id = claim.claim_id.clone();
+        checkpoint.claims.insert(claim_id.clone(), claim);
         checkpoint.next_action = format!("start claim `{claim_id}`");
         self.save(checkpoint)?;
         Ok(claim_id)
+    }
+
+    pub fn commit_coordination_plan(
+        &self,
+        checkpoint: &mut AutomationRootCheckpoint,
+        profile: &AutomationProfile,
+        plan: AutomationCoordinationPlan,
+    ) -> Result<AutomationCoordinationCommit, AutomationRunError> {
+        if checkpoint.lease_epoch != plan.expected_lease_epoch
+            || checkpoint.revision != plan.expected_revision
+        {
+            return Err(AutomationRunError::StaleLease {
+                expected_epoch: plan.expected_lease_epoch,
+                expected_revision: plan.expected_revision,
+                actual_epoch: checkpoint.lease_epoch,
+                actual_revision: checkpoint.revision,
+            });
+        }
+        self.ensure_fresh(plan.expected_lease_epoch, plan.expected_revision)?;
+        if plan.replayed {
+            return Ok(AutomationCoordinationCommit {
+                dispatch_intent: checkpoint.coordination.dispatch_intent.clone(),
+                replayed: true,
+                counts: automation_queue_counts(checkpoint),
+            });
+        }
+
+        let canonical_profile = serde_json::to_value(profile)
+            .map_err(std::io::Error::other)
+            .and_then(|value| crate::canonical_sha256(&value).map_err(std::io::Error::other))?;
+        if canonical_profile != plan.dispatch_profile_digest {
+            return Err(AutomationRunError::ProfileDigestMismatch);
+        }
+
+        let mut next = checkpoint.clone();
+        next.queue = plan.queue;
+        for (claim_id, tracker_state) in plan.tracker_states {
+            if let Some(claim) = next.claims.get_mut(&claim_id) {
+                claim.tracker_state = tracker_state;
+            }
+        }
+        let selected_new_issue = matches!(
+            &plan.selection,
+            Some(AutomationCoordinationSelection::NewIssue(_))
+        );
+        match plan.selection {
+            Some(AutomationCoordinationSelection::NewIssue(issue)) => {
+                let mut claim = prepare_automation_claim(
+                    &next,
+                    &issue,
+                    plan.coordination
+                        .dispatch_intent
+                        .as_ref()
+                        .map(|intent| intent.attempt)
+                        .unwrap_or(1),
+                    &plan.dispatch_profile_digest,
+                    plan.dispatch_profile_revision,
+                )?;
+                if plan
+                    .coordination
+                    .dispatch_intent
+                    .as_ref()
+                    .is_none_or(|intent| intent.claim_id != claim.claim_id)
+                {
+                    return Err(AutomationRunError::PendingDispatchIntent(
+                        "coordination plan lost its new-claim identity".into(),
+                    ));
+                }
+                if let Some(task_prompt) = plan.task_prompt.as_ref() {
+                    claim.task_prompt.clone_from(task_prompt);
+                }
+                next.claims.insert(claim.claim_id.clone(), claim);
+            }
+            Some(AutomationCoordinationSelection::DueClaim { claim_id, retry }) => {
+                let claim = next
+                    .claims
+                    .get(&claim_id)
+                    .ok_or_else(|| AutomationRunError::MissingClaim(claim_id.clone()))?;
+                if !claim_is_active(claim.status) || claim.retry.as_ref() != Some(&retry) {
+                    return Err(AutomationRunError::RetryNotReady(claim_id));
+                }
+            }
+            None => {}
+        }
+        let activate_pending_profile = selected_new_issue
+            && next.profile_revision.pending_digest.as_deref()
+                == Some(plan.dispatch_profile_digest.as_str());
+        if activate_pending_profile {
+            next.profile_digest = plan.dispatch_profile_digest.clone();
+            next.profile_revision.revision = plan.dispatch_profile_revision;
+            next.profile_revision.status = AutomationProfileRevisionStatus::Active;
+            next.profile_revision.pending_digest = None;
+            next.profile_revision.rejected_digest = None;
+            next.profile_revision.diagnostics.clear();
+        }
+        next.coordination = plan.coordination;
+        next.next_action.clone_from(&next.coordination.next_action);
+        let active_profile =
+            activate_pending_profile.then_some((plan.dispatch_profile_digest.as_str(), profile));
+        self.persist_with_active_profile(
+            &mut next,
+            plan.expected_lease_epoch,
+            plan.expected_revision,
+            active_profile,
+        )?;
+        let result = AutomationCoordinationCommit {
+            dispatch_intent: next.coordination.dispatch_intent.clone(),
+            replayed: false,
+            counts: automation_queue_counts(&next),
+        };
+        *checkpoint = next;
+        Ok(result)
+    }
+
+    pub fn start_dispatch_intent(
+        &self,
+        checkpoint: &mut AutomationRootCheckpoint,
+        intent_id: &str,
+        tracker_issue_active: bool,
+        now_ms: u64,
+    ) -> Result<AutomationDispatchIntent, AutomationRunError> {
+        let expected_epoch = checkpoint.lease_epoch;
+        let expected_revision = checkpoint.revision;
+        self.ensure_fresh(expected_epoch, expected_revision)?;
+        let mut next = checkpoint.clone();
+        let intent = next
+            .coordination
+            .dispatch_intent
+            .as_ref()
+            .filter(|intent| intent.intent_id == intent_id)
+            .ok_or_else(|| AutomationRunError::MissingDispatchIntent(intent_id.into()))?;
+        let intent_status = intent.status;
+        let intent_kind = intent.kind;
+        let intent_claim_id = intent.claim_id.clone();
+        let intent_ready_at_ms = intent.ready_at_ms;
+        if !matches!(
+            intent_status,
+            AutomationDispatchIntentStatus::Pending | AutomationDispatchIntentStatus::Started
+        ) {
+            return Err(AutomationRunError::InvalidDispatchIntentStatus {
+                intent_id: intent_id.into(),
+                actual: intent_status,
+            });
+        }
+        let claim = next
+            .claims
+            .get_mut(&intent_claim_id)
+            .ok_or_else(|| AutomationRunError::MissingClaim(intent_claim_id.clone()))?;
+        if intent_status == AutomationDispatchIntentStatus::Started
+            && matches!(
+                claim.status,
+                AutomationClaimStatus::Completed
+                    | AutomationClaimStatus::Cancelled
+                    | AutomationClaimStatus::Failed
+            )
+        {
+            let intent = next.coordination.dispatch_intent.as_mut().unwrap();
+            intent.status = AutomationDispatchIntentStatus::Completed;
+            next.coordination.next_action =
+                "dispatch outcome was already durable; scan the next bounded tracker page".into();
+            next.next_action.clone_from(&next.coordination.next_action);
+            let result = intent.clone();
+            self.persist(&mut next, expected_epoch, expected_revision)?;
+            *checkpoint = next;
+            return Ok(result);
+        }
+        if !claim_is_active(claim.status) {
+            return Err(AutomationRunError::InactiveClaim(intent_claim_id));
+        }
+        if !tracker_issue_active {
+            claim.retry = None;
+            claim.status = AutomationClaimStatus::Cancelled;
+            claim.next_action = "tracker issue became terminal; stop future invocations".into();
+            let intent = next.coordination.dispatch_intent.as_mut().unwrap();
+            intent.status = AutomationDispatchIntentStatus::Completed;
+            next.coordination.next_action =
+                "dispatch cancelled after tracker freshness check; scan the next page".into();
+        } else if intent_status == AutomationDispatchIntentStatus::Started {
+            return Ok(next.coordination.dispatch_intent.clone().unwrap());
+        } else {
+            match intent_kind {
+                AutomationDispatchIntentKind::NewClaim => {}
+                AutomationDispatchIntentKind::Retry
+                | AutomationDispatchIntentKind::Continuation => {
+                    let retry = claim
+                        .retry
+                        .clone()
+                        .filter(|retry| retry.ready_at_ms <= now_ms)
+                        .ok_or_else(|| {
+                            AutomationRunError::RetryNotReady(intent_claim_id.clone())
+                        })?;
+                    let expected_kind = match retry.kind {
+                        AutomationRetryKind::Retry => AutomationDispatchIntentKind::Retry,
+                        AutomationRetryKind::Continuation => {
+                            AutomationDispatchIntentKind::Continuation
+                        }
+                    };
+                    if expected_kind != intent_kind || intent_ready_at_ms != Some(retry.ready_at_ms)
+                    {
+                        return Err(AutomationRunError::RetryNotReady(intent_claim_id));
+                    }
+                    if retry.reset_turn_window {
+                        claim.turns_in_window = 0;
+                        claim.continuation_count = claim.continuation_count.saturating_add(1);
+                    }
+                    claim.retry = None;
+                    claim.workflow_run_id = None;
+                    claim.workflow_status = None;
+                    claim.status = AutomationClaimStatus::Running;
+                    claim.last_progress_at_ms = Some(now_ms);
+                    claim.next_action =
+                        "invoke the selected typed Workflow in the retained Issue task".into();
+                }
+            }
+            let intent = next.coordination.dispatch_intent.as_mut().unwrap();
+            intent.status = AutomationDispatchIntentStatus::Started;
+            next.coordination.next_action =
+                format!("finish durable dispatch intent `{intent_id}` in the retained Issue task");
+        }
+        next.next_action.clone_from(&next.coordination.next_action);
+        let result = next.coordination.dispatch_intent.clone().unwrap();
+        self.persist(&mut next, expected_epoch, expected_revision)?;
+        *checkpoint = next;
+        Ok(result)
+    }
+
+    pub fn complete_dispatch_intent(
+        &self,
+        checkpoint: &mut AutomationRootCheckpoint,
+        intent_id: &str,
+    ) -> Result<AutomationDispatchIntent, AutomationRunError> {
+        let expected_epoch = checkpoint.lease_epoch;
+        let expected_revision = checkpoint.revision;
+        self.ensure_fresh(expected_epoch, expected_revision)?;
+        let mut next = checkpoint.clone();
+        let intent = next
+            .coordination
+            .dispatch_intent
+            .as_mut()
+            .filter(|intent| intent.intent_id == intent_id)
+            .ok_or_else(|| AutomationRunError::MissingDispatchIntent(intent_id.into()))?;
+        if intent.status == AutomationDispatchIntentStatus::Completed {
+            return Ok(intent.clone());
+        }
+        if intent.status != AutomationDispatchIntentStatus::Started {
+            return Err(AutomationRunError::InvalidDispatchIntentStatus {
+                intent_id: intent_id.into(),
+                actual: intent.status,
+            });
+        }
+        intent.status = AutomationDispatchIntentStatus::Completed;
+        next.coordination.next_action =
+            "dispatch committed; scan the next bounded tracker page".into();
+        next.next_action.clone_from(&next.coordination.next_action);
+        let result = intent.clone();
+        self.persist(&mut next, expected_epoch, expected_revision)?;
+        *checkpoint = next;
+        Ok(result)
     }
 
     /// Reconcile normalized tracker pages into a deterministic queue and claim
@@ -1378,7 +1721,7 @@ impl AutomationRunStore {
                 claim.next_action = "inspect missing Issue task; do not create a duplicate".into();
                 continue;
             }
-            if claim.worktree.exists() == false && claim.issue_task.is_some() {
+            if !claim.worktree.exists() && claim.issue_task.is_some() {
                 blockers.push(format!("{} missing worktree", claim.issue_identifier));
                 claim.next_action = "inspect missing worktree; do not create a duplicate".into();
                 continue;
@@ -1990,7 +2333,23 @@ impl AutomationRunStore {
         expected_epoch: u64,
         expected_revision: u64,
     ) -> Result<(), AutomationRunError> {
+        self.persist_with_active_profile(checkpoint, expected_epoch, expected_revision, None)
+    }
+
+    fn persist_with_active_profile(
+        &self,
+        checkpoint: &mut AutomationRootCheckpoint,
+        expected_epoch: u64,
+        expected_revision: u64,
+        active_profile: Option<(&str, &AutomationProfile)>,
+    ) -> Result<(), AutomationRunError> {
+        let _guard = AUTOMATION_STATE_WRITE_LOCK
+            .lock()
+            .map_err(|_| std::io::Error::other("Automation state write lock is poisoned"))?;
         self.ensure_fresh(expected_epoch, expected_revision)?;
+        if let Some((digest, profile)) = active_profile {
+            self.write_active_profile_snapshot(digest, profile)?;
+        }
         let previous_revision = checkpoint.revision;
         checkpoint.revision = expected_revision.saturating_add(1);
         if let Err(error) = atomic_json(&self.root.join("automation-state.json"), checkpoint) {
@@ -2211,6 +2570,423 @@ pub fn automation_claim_liveness(
         return AutomationClaimLiveness::Stalled;
     }
     AutomationClaimLiveness::Active
+}
+
+pub fn plan_coordination_page(
+    checkpoint: &AutomationRootCheckpoint,
+    profile: &AutomationProfile,
+    page: AutomationCoordinationPage<'_>,
+    attempt: u32,
+    now_ms: u64,
+) -> Result<AutomationCoordinationPlan, AutomationRunError> {
+    let canonical_profile = serde_json::to_value(profile)
+        .map_err(std::io::Error::other)
+        .and_then(|value| crate::canonical_sha256(&value).map_err(std::io::Error::other))?;
+    let dispatch_profile_digest = checkpoint
+        .profile_revision
+        .pending_digest
+        .clone()
+        .unwrap_or_else(|| checkpoint.profile_digest.clone());
+    if canonical_profile != dispatch_profile_digest {
+        return Err(AutomationRunError::ProfileDigestMismatch);
+    }
+    let dispatch_profile_revision = if checkpoint.profile_revision.pending_digest.is_some() {
+        checkpoint.profile_revision.revision.saturating_add(1)
+    } else {
+        checkpoint.profile_revision.revision
+    };
+
+    let (expected_scan_revision, input_cursor, output_cursor, issues) = match page {
+        AutomationCoordinationPage::Ready {
+            expected_scan_revision,
+            input_cursor,
+            output_cursor,
+            issues,
+        } => (expected_scan_revision, input_cursor, output_cursor, issues),
+        AutomationCoordinationPage::Skipped {
+            expected_scan_revision,
+            input_cursor,
+            reason,
+        } => {
+            if expected_scan_revision != checkpoint.coordination.scan_revision
+                || input_cursor != checkpoint.coordination.output_cursor.as_deref()
+            {
+                return Err(AutomationRunError::CoordinationCursorMismatch {
+                    expected_scan_revision,
+                    actual_scan_revision: checkpoint.coordination.scan_revision,
+                });
+            }
+            let mut coordination = checkpoint.coordination.clone();
+            coordination.cycle = coordination.cycle.saturating_add(1);
+            coordination.intake_status = AutomationCoordinationIntakeStatus::Skipped;
+            coordination.started_at_ms = Some(now_ms);
+            coordination.completed_at_ms = Some(now_ms);
+            coordination.error = Some(bounded_preview(reason, 512));
+            let has_outstanding_intent = coordination
+                .dispatch_intent
+                .as_ref()
+                .is_some_and(|intent| intent.status != AutomationDispatchIntentStatus::Completed);
+            if !has_outstanding_intent {
+                coordination.next_action =
+                    "tracker intake skipped; preserve cursor and retained work".into();
+            }
+            return Ok(AutomationCoordinationPlan {
+                expected_lease_epoch: checkpoint.lease_epoch,
+                expected_revision: checkpoint.revision,
+                dispatch_profile_digest,
+                dispatch_profile_revision,
+                coordination,
+                queue: checkpoint.queue.clone(),
+                tracker_states: BTreeMap::new(),
+                selection: None,
+                replayed: false,
+                task_prompt: None,
+            });
+        }
+    };
+    if issues.len() > MAX_AUTOMATION_COORDINATION_PAGE_ISSUES {
+        return Err(AutomationRunError::CoordinationPageTooLarge {
+            count: issues.len(),
+            limit: MAX_AUTOMATION_COORDINATION_PAGE_ISSUES,
+        });
+    }
+
+    let mut observations = BTreeMap::<String, AutomationIssue>::new();
+    for issue in issues {
+        observations
+            .entry(issue.id.clone())
+            .and_modify(|current| {
+                if issue_observation_key(issue) > issue_observation_key(current) {
+                    *current = issue.clone();
+                }
+            })
+            .or_insert_with(|| issue.clone());
+    }
+    let normalized = observations.values().collect::<Vec<_>>();
+    let page_digest = crate::canonical_sha256(&serde_json::json!({
+        "inputCursor": input_cursor,
+        "outputCursor": output_cursor,
+        "issues": normalized,
+    }))
+    .map_err(std::io::Error::other)?;
+    if expected_scan_revision.saturating_add(1) == checkpoint.coordination.scan_revision
+        && checkpoint.coordination.intake_status == AutomationCoordinationIntakeStatus::Ready
+        && checkpoint.coordination.page_digest.as_deref() == Some(page_digest.as_str())
+        && checkpoint.coordination.input_cursor.as_deref() == input_cursor
+        && checkpoint.coordination.output_cursor.as_deref() == output_cursor
+    {
+        return Ok(AutomationCoordinationPlan {
+            expected_lease_epoch: checkpoint.lease_epoch,
+            expected_revision: checkpoint.revision,
+            dispatch_profile_digest,
+            dispatch_profile_revision,
+            coordination: checkpoint.coordination.clone(),
+            queue: checkpoint.queue.clone(),
+            tracker_states: BTreeMap::new(),
+            selection: None,
+            replayed: true,
+            task_prompt: None,
+        });
+    }
+    if expected_scan_revision.saturating_add(1) == checkpoint.coordination.scan_revision
+        && checkpoint.coordination.input_cursor.as_deref() == input_cursor
+    {
+        return Err(AutomationRunError::CoordinationPageConflict {
+            input_cursor: input_cursor.map(str::to_owned),
+        });
+    }
+    if expected_scan_revision != checkpoint.coordination.scan_revision
+        || input_cursor != checkpoint.coordination.output_cursor.as_deref()
+    {
+        return Err(AutomationRunError::CoordinationCursorMismatch {
+            expected_scan_revision,
+            actual_scan_revision: checkpoint.coordination.scan_revision,
+        });
+    }
+    if let Some(intent) = checkpoint
+        .coordination
+        .dispatch_intent
+        .as_ref()
+        .filter(|intent| intent.status != AutomationDispatchIntentStatus::Completed)
+    {
+        return Err(AutomationRunError::PendingDispatchIntent(
+            intent.intent_id.clone(),
+        ));
+    }
+
+    let tracker_states = checkpoint
+        .claims
+        .iter()
+        .filter_map(|(claim_id, claim)| {
+            observations
+                .get(&claim.issue_id)
+                .map(|issue| (claim_id.clone(), issue.state.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let due_claim = checkpoint
+        .claims
+        .values()
+        .filter(|claim| claim_is_active(claim.status))
+        .filter_map(|claim| {
+            let retry = claim
+                .retry
+                .as_ref()
+                .filter(|retry| retry.ready_at_ms <= now_ms)?;
+            Some((
+                retry.ready_at_ms,
+                claim.issue_identifier.as_str(),
+                claim.claim_id.as_str(),
+                claim,
+                retry,
+            ))
+        })
+        .min_by(|left, right| (left.0, left.1, left.2).cmp(&(right.0, right.1, right.2)))
+        .map(
+            |(_, _, _, claim, retry)| AutomationCoordinationSelection::DueClaim {
+                claim_id: claim.claim_id.clone(),
+                retry: retry.clone(),
+            },
+        );
+
+    let mut queue = if input_cursor.is_none() {
+        BTreeMap::new()
+    } else {
+        checkpoint.queue.clone()
+    };
+    let mut selection = due_claim;
+    let claimed_issue_ids = checkpoint
+        .claims
+        .values()
+        .filter(|claim| claim_is_active(claim.status))
+        .map(|claim| claim.issue_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let required_labels = profile
+        .tracker
+        .required_labels
+        .iter()
+        .map(|label| label.trim().to_ascii_lowercase())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut eligible = Vec::new();
+    for issue in observations.values() {
+        queue.remove(&issue.id);
+        if claimed_issue_ids.contains(&issue.id) {
+            continue;
+        }
+        if is_terminal_state(profile, &issue.state) {
+            queue.insert(
+                issue.id.clone(),
+                queue_item(
+                    issue,
+                    AutomationQueueStatus::Terminal,
+                    "tracker state is terminal",
+                ),
+            );
+            continue;
+        }
+        if !is_active_state(profile, &issue.state) {
+            continue;
+        }
+        let labels = issue
+            .labels
+            .iter()
+            .map(|label| label.trim().to_ascii_lowercase())
+            .collect::<std::collections::BTreeSet<_>>();
+        if !required_labels.is_subset(&labels) {
+            continue;
+        }
+        if has_nonterminal_blocker(profile, issue) {
+            queue.insert(
+                issue.id.clone(),
+                queue_item(
+                    issue,
+                    AutomationQueueStatus::Blocked,
+                    "waiting for a nonterminal blocker",
+                ),
+            );
+            continue;
+        }
+        eligible.push(issue.clone());
+    }
+    eligible.sort_by(|left, right| dispatch_key(left).cmp(&dispatch_key(right)));
+
+    let active_total = checkpoint
+        .claims
+        .values()
+        .filter(|claim| claim_is_active(claim.status))
+        .count() as u32;
+    let mut active_by_state = BTreeMap::<String, u32>::new();
+    for claim in checkpoint
+        .claims
+        .values()
+        .filter(|claim| claim_is_active(claim.status))
+    {
+        *active_by_state
+            .entry(claim.tracker_state.to_ascii_lowercase())
+            .or_default() += 1;
+    }
+    for issue in eligible {
+        let reason = if selection.is_some() {
+            Some("waiting for the next bounded coordination cycle")
+        } else if active_total >= profile.agent.max_concurrent_agents {
+            Some("waiting for global capacity")
+        } else {
+            let state_key = issue.state.to_ascii_lowercase();
+            let state_active = active_by_state.get(&state_key).copied().unwrap_or_default();
+            state_limit(profile, &issue.state)
+                .is_some_and(|limit| state_active >= limit)
+                .then_some("waiting for state capacity")
+        };
+        if let Some(reason) = reason {
+            queue.insert(
+                issue.id.clone(),
+                queue_item(&issue, AutomationQueueStatus::Queued, reason),
+            );
+        } else {
+            selection = Some(AutomationCoordinationSelection::NewIssue(Box::new(issue)));
+        }
+    }
+
+    let cycle = checkpoint.coordination.cycle.saturating_add(1);
+    let dispatch_intent = selection.as_ref().map(|selection| {
+        let (claim_id, issue_id, kind, selected_attempt, profile_digest, ready_at_ms) =
+            match selection {
+                AutomationCoordinationSelection::NewIssue(issue) => (
+                    format!(
+                        "claim-{}",
+                        &sha256(format!("{}\0{attempt}", issue.id).as_bytes())[..16]
+                    ),
+                    issue.id.clone(),
+                    AutomationDispatchIntentKind::NewClaim,
+                    attempt,
+                    dispatch_profile_digest.clone(),
+                    None,
+                ),
+                AutomationCoordinationSelection::DueClaim { claim_id, retry } => {
+                    let claim = &checkpoint.claims[claim_id];
+                    (
+                        claim_id.clone(),
+                        claim.issue_id.clone(),
+                        match retry.kind {
+                            AutomationRetryKind::Retry => AutomationDispatchIntentKind::Retry,
+                            AutomationRetryKind::Continuation => {
+                                AutomationDispatchIntentKind::Continuation
+                            }
+                        },
+                        claim.attempt,
+                        claim.profile_digest.clone(),
+                        Some(retry.ready_at_ms),
+                    )
+                }
+            };
+        let kind_key = match kind {
+            AutomationDispatchIntentKind::NewClaim => "new_claim",
+            AutomationDispatchIntentKind::Retry => "retry",
+            AutomationDispatchIntentKind::Continuation => "continuation",
+        };
+        let intent_id = format!(
+            "intent-{}",
+            &sha256(format!("{}\0{cycle}\0{claim_id}\0{kind_key}", checkpoint.run_id).as_bytes())
+                [..16]
+        );
+        AutomationDispatchIntent {
+            intent_id,
+            claim_id,
+            issue_id,
+            kind,
+            status: AutomationDispatchIntentStatus::Pending,
+            attempt: selected_attempt,
+            profile_digest,
+            created_at_ms: now_ms,
+            ready_at_ms,
+        }
+    });
+    let next_action = dispatch_intent.as_ref().map_or_else(
+        || "coordination page committed; wait for capacity or tracker changes".into(),
+        |intent| format!("execute durable dispatch intent `{}`", intent.intent_id),
+    );
+    let coordination = AutomationCoordinationCheckpoint {
+        cycle,
+        scan_revision: checkpoint.coordination.scan_revision.saturating_add(1),
+        input_cursor: input_cursor.map(str::to_owned),
+        output_cursor: output_cursor.map(str::to_owned),
+        intake_status: AutomationCoordinationIntakeStatus::Ready,
+        page_digest: Some(page_digest),
+        started_at_ms: Some(now_ms),
+        completed_at_ms: Some(now_ms),
+        error: None,
+        next_action,
+        dispatch_intent,
+    };
+    Ok(AutomationCoordinationPlan {
+        expected_lease_epoch: checkpoint.lease_epoch,
+        expected_revision: checkpoint.revision,
+        dispatch_profile_digest,
+        dispatch_profile_revision,
+        coordination,
+        queue,
+        tracker_states,
+        selection,
+        replayed: false,
+        task_prompt: None,
+    })
+}
+
+fn prepare_automation_claim(
+    checkpoint: &AutomationRootCheckpoint,
+    issue: &AutomationIssue,
+    attempt: u32,
+    profile_digest: &str,
+    profile_revision: u64,
+) -> Result<AutomationIssueClaim, AutomationRunError> {
+    if checkpoint
+        .claims
+        .values()
+        .any(|claim| claim.issue_id == issue.id)
+    {
+        return Err(AutomationRunError::DuplicateIssue(issue.identifier.clone()));
+    }
+    let claim_id = format!(
+        "claim-{}",
+        &sha256(format!("{}\0{attempt}", issue.id).as_bytes())[..16]
+    );
+    let workspace_root = canonical_or_lexical(&checkpoint.workspace_root)?;
+    let issue_hash = &sha256(issue.id.as_bytes())[..12];
+    let worktree = workspace_root.join(format!(
+        "{}-{issue_hash}-a{attempt}",
+        safe_segment(&issue.identifier)
+    ));
+    if !worktree.starts_with(&workspace_root) || worktree == workspace_root {
+        return Err(AutomationRunError::UnsafeWorkspace);
+    }
+    Ok(AutomationIssueClaim {
+        claim_id,
+        issue_id: issue.id.clone(),
+        issue_identifier: issue.identifier.clone(),
+        issue_title: issue.title.clone(),
+        tracker_state: issue.state.clone(),
+        priority: issue.priority,
+        attempt,
+        profile_digest: profile_digest.into(),
+        profile_revision,
+        task_prompt: String::new(),
+        workflow_invocations: 0,
+        turns_in_window: 0,
+        continuation_count: 0,
+        retry_attempt: 0,
+        last_progress_at_ms: None,
+        retry: None,
+        status: AutomationClaimStatus::Claimed,
+        worktree,
+        source_revision: checkpoint.source_revision.clone(),
+        issue_task: None,
+        workflow_run_id: None,
+        workflow_status: None,
+        effects: Vec::new(),
+        steering_receipts: Vec::new(),
+        hook_receipts: Vec::new(),
+        cleanup: AutomationCleanupState::default(),
+        next_action: "create persistent issue worktree and native Issue task".into(),
+    })
 }
 
 fn is_active_state(profile: &AutomationProfile, state: &str) -> bool {
@@ -3088,6 +3864,661 @@ mod tests {
             "ORC-URGENT"
         );
         assert_eq!(result.counts.queued, 1);
+    }
+
+    #[test]
+    fn coordination_page_commit_is_atomic_bounded_and_replay_safe() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let mut profile = profile(workspace.path());
+        profile.agent.max_concurrent_agents = 4;
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-coordination-page",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let low = queued_issue("issue-low", "ORC-LOW", "Todo", Some(4));
+        let urgent = queued_issue("issue-urgent", "ORC-URGENT", "Todo", Some(1));
+        let issues = vec![low.clone(), urgent.clone()];
+        let before_revision = root.revision;
+        let plan = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                output_cursor: Some("cursor-1"),
+                issues: &issues,
+            },
+            1,
+            10_000,
+        )
+        .unwrap()
+        .with_task_prompt("Pinned rendered Automation prompt");
+        let committed = store
+            .commit_coordination_plan(&mut root, &profile, plan)
+            .unwrap();
+        let intent = committed.dispatch_intent.clone().unwrap();
+        assert!(!committed.replayed);
+        assert_eq!(intent.kind, AutomationDispatchIntentKind::NewClaim);
+        assert_eq!(intent.issue_id, urgent.id);
+        assert_eq!(root.claims.len(), 1);
+        assert_eq!(root.claims[&intent.claim_id].issue_identifier, "ORC-URGENT");
+        assert_eq!(
+            root.claims[&intent.claim_id].task_prompt,
+            "Pinned rendered Automation prompt"
+        );
+        assert_eq!(root.queue[&low.id].status, AutomationQueueStatus::Queued);
+        assert_eq!(root.coordination.scan_revision, 1);
+        assert_eq!(root.coordination.output_cursor.as_deref(), Some("cursor-1"));
+        assert_eq!(root.revision, before_revision + 1);
+        assert_eq!(store.load().unwrap(), root);
+
+        let committed_revision = root.revision;
+        let replay = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                output_cursor: Some("cursor-1"),
+                issues: &issues,
+            },
+            1,
+            11_000,
+        )
+        .unwrap();
+        let replayed = store
+            .commit_coordination_plan(&mut root, &profile, replay)
+            .unwrap();
+        assert!(replayed.replayed);
+        assert_eq!(replayed.dispatch_intent, Some(intent));
+        assert_eq!(root.revision, committed_revision);
+        assert_eq!(root.claims.len(), 1);
+
+        assert!(matches!(
+            plan_coordination_page(
+                &root,
+                &profile,
+                AutomationCoordinationPage::Ready {
+                    expected_scan_revision: 1,
+                    input_cursor: Some("cursor-1"),
+                    output_cursor: Some("cursor-2"),
+                    issues: &[],
+                },
+                1,
+                11_500,
+            ),
+            Err(AutomationRunError::PendingDispatchIntent(_))
+        ));
+        assert!(matches!(
+            plan_coordination_page(
+                &root,
+                &profile,
+                AutomationCoordinationPage::Ready {
+                    expected_scan_revision: 1,
+                    input_cursor: None,
+                    output_cursor: Some("cursor-2"),
+                    issues: &[],
+                },
+                1,
+                11_500,
+            ),
+            Err(AutomationRunError::CoordinationCursorMismatch { .. })
+        ));
+
+        let mut changed = issues;
+        changed[0].title = "Changed during replay".into();
+        assert!(matches!(
+            plan_coordination_page(
+                &root,
+                &profile,
+                AutomationCoordinationPage::Ready {
+                    expected_scan_revision: 0,
+                    input_cursor: None,
+                    output_cursor: Some("cursor-1"),
+                    issues: &changed,
+                },
+                1,
+                12_000,
+            ),
+            Err(AutomationRunError::CoordinationPageConflict { .. })
+        ));
+
+        let oversized = vec![issue(); MAX_AUTOMATION_COORDINATION_PAGE_ISSUES + 1];
+        assert!(matches!(
+            plan_coordination_page(
+                &root,
+                &profile,
+                AutomationCoordinationPage::Ready {
+                    expected_scan_revision: 1,
+                    input_cursor: Some("cursor-1"),
+                    output_cursor: None,
+                    issues: &oversized,
+                },
+                1,
+                13_000,
+            ),
+            Err(AutomationRunError::CoordinationPageTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn coordination_due_retry_wins_before_new_issue() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let mut profile = profile(workspace.path());
+        profile.agent.max_concurrent_agents = 4;
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-coordination-retry",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let claimed_issue = issue();
+        let claim_id = store.claim_fixture(&mut root, &claimed_issue, 1).unwrap();
+        store
+            .update_claim(&mut root, &claim_id, |claim| {
+                claim.workflow_run_id = Some("workflow-previous".into());
+                claim.workflow_status = Some(RunStatus::Completed);
+            })
+            .unwrap();
+        let retry = store
+            .schedule_claim_retry(&mut root, &claim_id, &profile, 5_000, "retry me")
+            .unwrap();
+        let new_issue = queued_issue("issue-new", "ORC-NEW", "Todo", Some(1));
+        let issues = vec![new_issue.clone()];
+        let plan = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                output_cursor: None,
+                issues: &issues,
+            },
+            1,
+            retry.ready_at_ms,
+        )
+        .unwrap();
+        let committed = store
+            .commit_coordination_plan(&mut root, &profile, plan)
+            .unwrap();
+        let intent = committed.dispatch_intent.unwrap();
+        assert_eq!(intent.kind, AutomationDispatchIntentKind::Retry);
+        assert_eq!(intent.claim_id, claim_id);
+        assert_eq!(intent.ready_at_ms, Some(retry.ready_at_ms));
+        assert_eq!(root.claims.len(), 1);
+        assert_eq!(
+            root.queue[&new_issue.id].reason,
+            "waiting for the next bounded coordination cycle"
+        );
+        assert_eq!(root.claims[&claim_id].retry, Some(retry.clone()));
+
+        let started = store
+            .start_dispatch_intent(&mut root, &intent.intent_id, true, retry.ready_at_ms)
+            .unwrap();
+        assert_eq!(started.status, AutomationDispatchIntentStatus::Started);
+        assert!(root.claims[&claim_id].retry.is_none());
+        assert!(root.claims[&claim_id].workflow_run_id.is_none());
+        assert!(root.claims[&claim_id].workflow_status.is_none());
+        let completed = store
+            .complete_dispatch_intent(&mut root, &intent.intent_id)
+            .unwrap();
+        assert_eq!(completed.status, AutomationDispatchIntentStatus::Completed);
+        let continuation = store
+            .record_completed_invocation(&mut root, &claim_id, &profile, true, 20_000)
+            .unwrap()
+            .unwrap();
+        let continuation_plan = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 1,
+                input_cursor: None,
+                output_cursor: None,
+                issues: &issues,
+            },
+            1,
+            continuation.ready_at_ms,
+        )
+        .unwrap();
+        let continued = store
+            .commit_coordination_plan(&mut root, &profile, continuation_plan)
+            .unwrap()
+            .dispatch_intent
+            .unwrap();
+        assert_eq!(continued.kind, AutomationDispatchIntentKind::Continuation);
+        assert_eq!(continued.claim_id, claim_id);
+        assert_eq!(
+            store
+                .start_dispatch_intent(
+                    &mut root,
+                    &continued.intent_id,
+                    true,
+                    continuation.ready_at_ms,
+                )
+                .unwrap()
+                .status,
+            AutomationDispatchIntentStatus::Started
+        );
+    }
+
+    #[test]
+    fn started_dispatch_revalidates_tracker_freshness_before_replay() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let profile = profile(workspace.path());
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-dispatch-freshness",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let tracked_issue = issue();
+        let plan = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                output_cursor: None,
+                issues: std::slice::from_ref(&tracked_issue),
+            },
+            1,
+            50_000,
+        )
+        .unwrap();
+        let intent = store
+            .commit_coordination_plan(&mut root, &profile, plan)
+            .unwrap()
+            .dispatch_intent
+            .unwrap();
+        assert_eq!(
+            store
+                .start_dispatch_intent(&mut root, &intent.intent_id, true, 50_100)
+                .unwrap()
+                .status,
+            AutomationDispatchIntentStatus::Started
+        );
+
+        let cancelled = store
+            .start_dispatch_intent(&mut root, &intent.intent_id, false, 50_200)
+            .unwrap();
+        assert_eq!(cancelled.status, AutomationDispatchIntentStatus::Completed);
+        assert_eq!(
+            root.claims[&intent.claim_id].status,
+            AutomationClaimStatus::Cancelled
+        );
+        assert_eq!(store.load().unwrap(), root);
+    }
+
+    #[test]
+    fn started_dispatch_finalizes_an_already_durable_terminal_claim() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let profile = profile(workspace.path());
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-dispatch-terminal",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let tracked_issue = issue();
+        let plan = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                output_cursor: None,
+                issues: std::slice::from_ref(&tracked_issue),
+            },
+            1,
+            50_000,
+        )
+        .unwrap();
+        let intent = store
+            .commit_coordination_plan(&mut root, &profile, plan)
+            .unwrap()
+            .dispatch_intent
+            .unwrap();
+        store
+            .start_dispatch_intent(&mut root, &intent.intent_id, true, 50_100)
+            .unwrap();
+        store
+            .update_claim(&mut root, &intent.claim_id, |claim| {
+                claim.status = AutomationClaimStatus::Completed;
+            })
+            .unwrap();
+
+        let finalized = store
+            .start_dispatch_intent(&mut root, &intent.intent_id, true, 50_200)
+            .unwrap();
+        assert_eq!(finalized.status, AutomationDispatchIntentStatus::Completed);
+        assert_eq!(
+            root.claims[&intent.claim_id].status,
+            AutomationClaimStatus::Completed
+        );
+        assert_eq!(store.load().unwrap(), root);
+    }
+
+    #[test]
+    fn coordination_pages_merge_queue_observations_until_the_next_scan() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let mut profile = profile(workspace.path());
+        profile.agent.max_concurrent_agents = 1;
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-coordination-pages",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        store.claim_fixture(&mut root, &issue(), 1).unwrap();
+        let first_issue = queued_issue("issue-page-1", "ORC-P1", "Todo", Some(2));
+        let first = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                output_cursor: Some("cursor-1"),
+                issues: std::slice::from_ref(&first_issue),
+            },
+            1,
+            40_000,
+        )
+        .unwrap();
+        store
+            .commit_coordination_plan(&mut root, &profile, first)
+            .unwrap();
+        assert!(root.queue.contains_key(&first_issue.id));
+
+        let second_issue = queued_issue("issue-page-2", "ORC-P2", "Todo", Some(3));
+        let second = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 1,
+                input_cursor: Some("cursor-1"),
+                output_cursor: None,
+                issues: std::slice::from_ref(&second_issue),
+            },
+            1,
+            41_000,
+        )
+        .unwrap();
+        store
+            .commit_coordination_plan(&mut root, &profile, second)
+            .unwrap();
+        assert!(root.queue.contains_key(&first_issue.id));
+        assert!(root.queue.contains_key(&second_issue.id));
+
+        let next_scan = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 2,
+                input_cursor: None,
+                output_cursor: None,
+                issues: std::slice::from_ref(&second_issue),
+            },
+            1,
+            42_000,
+        )
+        .unwrap();
+        store
+            .commit_coordination_plan(&mut root, &profile, next_scan)
+            .unwrap();
+        assert!(!root.queue.contains_key(&first_issue.id));
+        assert!(root.queue.contains_key(&second_issue.id));
+    }
+
+    #[test]
+    fn skipped_coordination_preserves_cursor_queue_claims_and_scan_revision() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let profile = profile(workspace.path());
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-coordination-skipped",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let claim_id = store.claim_fixture(&mut root, &issue(), 1).unwrap();
+        let queued = queued_issue("issue-queued", "ORC-Q", "Todo", Some(2));
+        root.queue.insert(
+            queued.id.clone(),
+            queue_item(
+                &queued,
+                AutomationQueueStatus::Queued,
+                "waiting for capacity",
+            ),
+        );
+        store.save(&mut root).unwrap();
+        let claims = root.claims.clone();
+        let queue = root.queue.clone();
+        let plan = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Skipped {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                reason: "missing tracker credential",
+            },
+            1,
+            20_000,
+        )
+        .unwrap();
+        store
+            .commit_coordination_plan(&mut root, &profile, plan)
+            .unwrap();
+        assert_eq!(root.coordination.scan_revision, 0);
+        assert_eq!(root.coordination.input_cursor, None);
+        assert_eq!(root.coordination.output_cursor, None);
+        assert_eq!(
+            root.coordination.intake_status,
+            AutomationCoordinationIntakeStatus::Skipped
+        );
+        assert!(
+            root.coordination
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("credential")
+        );
+        assert_eq!(root.claims, claims);
+        assert_eq!(root.queue, queue);
+        assert_eq!(root.claims[&claim_id].issue_identifier, "ORC-33");
+    }
+
+    #[test]
+    fn skipped_coordination_preserves_outstanding_dispatch_guidance() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let profile = profile(workspace.path());
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-skipped-with-dispatch",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let tracked_issue = issue();
+        let ready = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                output_cursor: None,
+                issues: std::slice::from_ref(&tracked_issue),
+            },
+            1,
+            60_000,
+        )
+        .unwrap();
+        let intent = store
+            .commit_coordination_plan(&mut root, &profile, ready)
+            .unwrap()
+            .dispatch_intent
+            .unwrap();
+        let dispatch_guidance = root.coordination.next_action.clone();
+
+        let skipped = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Skipped {
+                expected_scan_revision: 1,
+                input_cursor: None,
+                reason: "tracker temporarily unavailable",
+            },
+            1,
+            60_100,
+        )
+        .unwrap();
+        store
+            .commit_coordination_plan(&mut root, &profile, skipped)
+            .unwrap();
+        assert_eq!(
+            root.coordination
+                .dispatch_intent
+                .as_ref()
+                .unwrap()
+                .intent_id,
+            intent.intent_id
+        );
+        assert_eq!(root.coordination.next_action, dispatch_guidance);
+        assert!(root.coordination.next_action.contains(&intent.intent_id));
+    }
+
+    #[test]
+    fn stale_coordination_commit_leaves_caller_and_durable_state_unchanged() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let profile = profile(workspace.path());
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-coordination-stale",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let issue = issue();
+        let plan = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                output_cursor: None,
+                issues: std::slice::from_ref(&issue),
+            },
+            1,
+            30_000,
+        )
+        .unwrap();
+        let caller_before = root.clone();
+        let mut concurrent = root.clone();
+        store.save(&mut concurrent).unwrap();
+        assert!(matches!(
+            store.commit_coordination_plan(&mut root, &profile, plan),
+            Err(AutomationRunError::StaleLease { .. })
+        ));
+        assert_eq!(root, caller_before);
+        assert_eq!(store.load().unwrap(), concurrent);
+    }
+
+    #[test]
+    fn concurrent_checkpoint_writers_serialize_revision_check_and_replace() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let profile = profile(workspace.path());
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (_, root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-concurrent-coordination",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let run_id = root.run_id.clone();
+        let results = std::thread::scope(|scope| {
+            let spawn_writer = |next_action: &'static str| {
+                let barrier = barrier.clone();
+                let repository = repository.path();
+                let run_id = run_id.clone();
+                let mut checkpoint = root.clone();
+                scope.spawn(move || {
+                    checkpoint.next_action = next_action.into();
+                    let store = AutomationRunStore::open(repository, &run_id).unwrap();
+                    barrier.wait();
+                    store.save(&mut checkpoint)
+                })
+            };
+            let first = spawn_writer("first concurrent writer");
+            let second = spawn_writer("second concurrent writer");
+            barrier.wait();
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(AutomationRunError::StaleLease { .. })))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn old_automation_checkpoint_defaults_coordination_to_not_started() {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let profile = profile(workspace.path());
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (_, root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-old-coordination-schema",
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let mut value = serde_json::to_value(root).unwrap();
+        value.as_object_mut().unwrap().remove("coordination");
+        let decoded: AutomationRootCheckpoint = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            decoded.coordination.intake_status,
+            AutomationCoordinationIntakeStatus::NotStarted
+        );
+        assert_eq!(decoded.coordination.scan_revision, 0);
     }
 
     #[test]

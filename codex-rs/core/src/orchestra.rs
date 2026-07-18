@@ -334,6 +334,32 @@ impl OrchestraControl {
         })
     }
 
+    pub async fn resolve_spawned_agent(
+        &self,
+        task_name: &str,
+    ) -> CodexResult<Option<OrchestraAgentHandle>> {
+        let parent_path = self
+            .parent_source
+            .get_agent_path()
+            .unwrap_or_else(AgentPath::root);
+        let task_path = parent_path
+            .join(task_name)
+            .map_err(CodexErr::InvalidRequest)?;
+        let thread_id = match self
+            .control
+            .resolve_agent_reference(self.parent_thread_id, &self.parent_source, task_name)
+            .await
+        {
+            Ok(thread_id) => thread_id,
+            Err(CodexErr::UnsupportedOperation(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(OrchestraAgentHandle {
+            thread_id,
+            task_path,
+        }))
+    }
+
     pub async fn status(&self, handle: &OrchestraAgentHandle) -> AgentStatus {
         self.control.get_status(handle.thread_id).await
     }
@@ -652,7 +678,7 @@ mod tests {
                 .contains("ambiguous")
         );
         outcome.skills.pop();
-        outcome.disabled_paths.insert(one.path_to_skills_md.clone());
+        outcome.disabled_paths.insert(one.path_to_skills_md);
         assert!(
             resolve_required_skill(&outcome, "wayfinder", &BTreeSet::new())
                 .unwrap_err()

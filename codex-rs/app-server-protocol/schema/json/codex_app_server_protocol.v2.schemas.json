@@ -1269,6 +1269,95 @@
       ],
       "type": "object"
     },
+    "AutomationCoordinationIntakeStatus": {
+      "enum": [
+        "not_started",
+        "ready",
+        "skipped"
+      ],
+      "type": "string"
+    },
+    "AutomationCoordinationProjection": {
+      "properties": {
+        "completedAtMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cycle": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "dispatchIntent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutomationDispatchIntentProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraBoundedText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inputCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "intakeStatus": {
+          "$ref": "#/definitions/AutomationCoordinationIntakeStatus"
+        },
+        "nextAction": {
+          "$ref": "#/definitions/OrchestraBoundedText"
+        },
+        "outputCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pageDigest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scanRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "startedAtMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cycle",
+        "intakeStatus",
+        "nextAction",
+        "scanRevision"
+      ],
+      "type": "object"
+    },
     "AutomationDiagnostic": {
       "properties": {
         "code": {
@@ -1313,6 +1402,73 @@
         "workflow_input_needs_default",
         "template_parse_error",
         "template_render_error"
+      ],
+      "type": "string"
+    },
+    "AutomationDispatchIntentKind": {
+      "enum": [
+        "new_claim",
+        "retry",
+        "continuation"
+      ],
+      "type": "string"
+    },
+    "AutomationDispatchIntentProjection": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "claimId": {
+          "type": "string"
+        },
+        "createdAtMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "intentId": {
+          "type": "string"
+        },
+        "issueId": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/AutomationDispatchIntentKind"
+        },
+        "profileDigest": {
+          "type": "string"
+        },
+        "readyAtMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/AutomationDispatchIntentStatus"
+        }
+      },
+      "required": [
+        "attempt",
+        "claimId",
+        "createdAtMs",
+        "intentId",
+        "issueId",
+        "kind",
+        "profileDigest",
+        "status"
+      ],
+      "type": "object"
+    },
+    "AutomationDispatchIntentStatus": {
+      "enum": [
+        "pending",
+        "started",
+        "completed"
       ],
       "type": "string"
     },
@@ -1610,6 +1766,11 @@
         "cleanup": {
           "$ref": "#/definitions/AutomationCleanupProjection"
         },
+        "continuationCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "effects": {
           "items": {
             "$ref": "#/definitions/AutomationEffectReceiptProjection"
@@ -1641,6 +1802,14 @@
         "issueTitle": {
           "$ref": "#/definitions/OrchestraBoundedText"
         },
+        "lastProgressAtMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "latestSteeringReceipt": {
           "anyOf": [
             {
@@ -1669,6 +1838,11 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "retryAttempt": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "sourceRevision": {
           "type": "string"
         },
@@ -1677,6 +1851,16 @@
         },
         "trackerState": {
           "type": "string"
+        },
+        "turnsInWindow": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "workflowInvocations": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
         },
         "workflowRunId": {
           "type": [
@@ -1702,6 +1886,7 @@
         "attempt",
         "claimId",
         "cleanup",
+        "continuationCount",
         "effects",
         "hookReceipts",
         "issueId",
@@ -1710,9 +1895,12 @@
         "nextAction",
         "profileDigest",
         "profileRevision",
+        "retryAttempt",
         "sourceRevision",
         "status",
         "trackerState",
+        "turnsInWindow",
+        "workflowInvocations",
         "worktree"
       ],
       "type": "object"
@@ -2164,6 +2352,9 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "coordination": {
+          "$ref": "#/definitions/AutomationCoordinationProjection"
+        },
         "leaseEpoch": {
           "format": "uint64",
           "minimum": 0.0,
@@ -2245,6 +2436,7 @@
       "required": [
         "claims",
         "claimsTotal",
+        "coordination",
         "leaseEpoch",
         "nextAction",
         "ownerThreadId",

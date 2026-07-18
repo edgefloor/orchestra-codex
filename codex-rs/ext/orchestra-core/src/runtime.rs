@@ -144,6 +144,60 @@ impl<H: NativeHost> OrchestraRuntime<H> {
     where
         F: FnOnce(&RunCheckpoint) -> Result<(), String>,
     {
+        self.run_with_inputs_observed_inner(
+            repository,
+            parent_thread_id,
+            None,
+            plan,
+            provided_inputs,
+            on_created,
+        )
+        .await
+    }
+
+    /// Run a workflow under a caller-reserved durable identity. Automation
+    /// persists this identity in its Issue claim before workflow creation so a
+    /// crash cannot orphan one Run and create a second Run during recovery.
+    pub async fn run_with_inputs_observed_as<F>(
+        &self,
+        repository: &Path,
+        parent_thread_id: &str,
+        run_id: &str,
+        plan: ExecutionPlan,
+        provided_inputs: Option<&Value>,
+        on_created: F,
+    ) -> Result<RunOutcome, RunError>
+    where
+        F: FnOnce(&RunCheckpoint) -> Result<(), String>,
+    {
+        if !valid_reserved_run_id(run_id) {
+            return Err(RunError::Validation(
+                "reserved run id must be 1-128 ASCII letters, digits, '-' or '_'".into(),
+            ));
+        }
+        self.run_with_inputs_observed_inner(
+            repository,
+            parent_thread_id,
+            Some(run_id),
+            plan,
+            provided_inputs,
+            on_created,
+        )
+        .await
+    }
+
+    async fn run_with_inputs_observed_inner<F>(
+        &self,
+        repository: &Path,
+        parent_thread_id: &str,
+        reserved_run_id: Option<&str>,
+        plan: ExecutionPlan,
+        provided_inputs: Option<&Value>,
+        on_created: F,
+    ) -> Result<RunOutcome, RunError>
+    where
+        F: FnOnce(&RunCheckpoint) -> Result<(), String>,
+    {
         let errors = validate_plan(&plan);
         if !errors.is_empty() {
             return Err(RunError::Validation(
@@ -163,7 +217,9 @@ impl<H: NativeHost> OrchestraRuntime<H> {
         }))?;
         let plan_bytes = serde_json::to_vec(&plan).expect("plan serializes");
         let hash = format!("{:x}", Sha256::digest(&plan_bytes));
-        let run_id = new_run_id(&hash);
+        let run_id = reserved_run_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| new_run_id(&hash));
         let revision = repository_revision(repository)?;
         let resolved_skills = if skill_requirements.is_empty() {
             self.host
@@ -1314,6 +1370,13 @@ fn new_run_id(hash: &str) -> String {
         .as_millis();
     format!("{millis}-{}", &hash[..12])
 }
+fn valid_reserved_run_id(run_id: &str) -> bool {
+    !run_id.is_empty()
+        && run_id.len() <= 128
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
 fn shared_worktree_path(repository: &Path, run_id: &str) -> PathBuf {
     repository
         .join(".codex/orchestra/worktrees")
@@ -1886,6 +1949,43 @@ mod tests {
             requests
                 .iter()
                 .any(|request| request.task_name.contains("inspect_runtime"))
+        );
+    }
+
+    #[tokio::test]
+    async fn caller_reserved_run_identity_is_persisted_before_execution() {
+        let repository = repo();
+        let runtime = OrchestraRuntime::new(FakeHost::new(vec![r#"{"ok":true}"#]));
+        let result = runtime
+            .run_with_inputs_observed_as(
+                repository.path(),
+                "parent",
+                "automation-intent-1",
+                ExecutionPlan {
+                    inputs: BTreeMap::new(),
+                    name: "reserved".into(),
+                    description: String::new(),
+                    max_parallel: 1,
+                    steps: vec![agent("reserved", vec![])],
+                },
+                None,
+                |checkpoint| {
+                    assert_eq!(checkpoint.run_id, "automation-intent-1");
+                    assert_eq!(checkpoint.status, RunStatus::Pending);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        let RunOutcome::Completed(checkpoint) = result else {
+            panic!("reserved run should complete")
+        };
+        assert_eq!(checkpoint.run_id, "automation-intent-1");
+        assert!(
+            repository
+                .path()
+                .join(".codex/orchestra/runs/automation-intent-1/state.json")
+                .is_file()
         );
     }
 

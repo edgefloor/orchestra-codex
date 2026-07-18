@@ -23,6 +23,10 @@ use codex_orchestra_core::AutomationClaimLiveness;
 use codex_orchestra_core::AutomationClaimReconciliation;
 use codex_orchestra_core::AutomationClaimStatus;
 use codex_orchestra_core::AutomationCleanupStatus;
+use codex_orchestra_core::AutomationCoordinationPage;
+use codex_orchestra_core::AutomationDispatchIntent;
+use codex_orchestra_core::AutomationDispatchIntentKind;
+use codex_orchestra_core::AutomationDispatchIntentStatus;
 use codex_orchestra_core::AutomationEffect;
 use codex_orchestra_core::AutomationEffectExecution;
 use codex_orchestra_core::AutomationEffectReceipt;
@@ -34,6 +38,7 @@ use codex_orchestra_core::AutomationIssue;
 use codex_orchestra_core::AutomationProfile;
 use codex_orchestra_core::AutomationQueueCategory;
 use codex_orchestra_core::AutomationQueuePage;
+use codex_orchestra_core::AutomationReconciliationStatus;
 use codex_orchestra_core::AutomationRetryKind;
 use codex_orchestra_core::AutomationRootCheckpoint;
 use codex_orchestra_core::AutomationRootStatus;
@@ -78,6 +83,7 @@ use codex_orchestra_core::compile_workflow;
 use codex_orchestra_core::normalize_linear_issue;
 use codex_orchestra_core::normalize_linear_issue_page;
 use codex_orchestra_core::normalize_pull_request_url;
+use codex_orchestra_core::plan_coordination_page;
 use codex_orchestra_core::repository_revision;
 use codex_orchestra_core::validate_automation_profile;
 use codex_protocol::AgentPath;
@@ -100,6 +106,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -268,6 +275,24 @@ impl CodexHost {
             .send_input(&native_handle(handle)?, input)
             .await
             .map_err(|error| error.to_string())
+    }
+
+    async fn resolve_spawned_agent(
+        &self,
+        parent_thread_id: &str,
+        task_name: &str,
+    ) -> Result<Option<AgentHandle>, String> {
+        let native = self
+            .control(parent_thread_id)
+            .await?
+            .resolve_spawned_agent(task_name)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(native.map(|handle| AgentHandle {
+            thread_id: handle.thread_id.to_string(),
+            task_path: handle.task_path.to_string(),
+            parent_thread_id: parent_thread_id.to_owned(),
+        }))
     }
 }
 
@@ -658,6 +683,7 @@ pub struct OrchestraService {
     queries: ExecutionQueryService,
     manager: Weak<ThreadManager>,
     automation_shutdown: Arc<AutomationShutdownFence>,
+    automation_dispatches: Arc<AutomationDispatchFence>,
 }
 
 type AutomationStartResult = Result<AutomationRootCheckpoint, String>;
@@ -667,6 +693,33 @@ type AutomationStartSignal =
 #[derive(Default)]
 struct AutomationShutdownFence {
     roots: Mutex<BTreeMap<(PathBuf, String), ()>>,
+}
+
+#[derive(Default)]
+struct AutomationDispatchFence {
+    intents: Mutex<BTreeSet<(PathBuf, String, String)>>,
+}
+
+impl AutomationDispatchFence {
+    fn try_track(&self, repository: &Path, run_id: &str, intent_id: &str) -> bool {
+        self.intents.lock().is_ok_and(|mut intents| {
+            intents.insert((
+                repository.to_path_buf(),
+                run_id.to_owned(),
+                intent_id.to_owned(),
+            ))
+        })
+    }
+
+    fn remove(&self, repository: &Path, run_id: &str, intent_id: &str) {
+        if let Ok(mut intents) = self.intents.lock() {
+            intents.remove(&(
+                repository.to_path_buf(),
+                run_id.to_owned(),
+                intent_id.to_owned(),
+            ));
+        }
+    }
 }
 
 impl AutomationShutdownFence {
@@ -720,6 +773,7 @@ impl OrchestraService {
             ),
             manager,
             automation_shutdown: Arc::new(AutomationShutdownFence::default()),
+            automation_dispatches: Arc::new(AutomationDispatchFence::default()),
         }
     }
 
@@ -1122,6 +1176,33 @@ impl OrchestraService {
         parent_thread_id: &str,
         profile_path: &str,
     ) -> Result<AutomationRootCheckpoint, String> {
+        let repository = self.repository(parent_thread_id).await?;
+        if let Some(mut root) = find_task_automation_root(&repository, parent_thread_id)?
+            && outstanding_dispatch_intent(&root).is_some()
+        {
+            self.automation_shutdown.track(&repository, &root.run_id);
+            if root.status != AutomationRootStatus::Running
+                || root.reconciliation != AutomationReconciliationStatus::Complete
+            {
+                root = self
+                    .reconcile_automation(parent_thread_id, &root.run_id, profile_path, true)
+                    .await?;
+            }
+            if root.status == AutomationRootStatus::Running
+                && root.reconciliation == AutomationReconciliationStatus::Complete
+                && let Some(intent) = outstanding_dispatch_intent(&root)
+            {
+                self.spawn_automation_dispatch(
+                    parent_thread_id,
+                    profile_path,
+                    &repository,
+                    &root.run_id,
+                    intent,
+                );
+            }
+            return Ok(root);
+        }
+
         let preview_issue = AutomationIssue {
             id: "production-start".into(),
             identifier: "PRODUCTION-START".into(),
@@ -1160,21 +1241,10 @@ impl OrchestraService {
         let profile_digest = validation
             .profile_digest
             .ok_or("valid Automation profile is missing its digest")?;
-        let intake = self
-            .read_linear_automation_with_profile(
-                &profile,
-                AutomationLinearReadKind::Candidates,
-                None,
-                Some(50),
-                None,
-            )
-            .await?;
-        if intake.status == AutomationLinearReadStatus::Skipped {
-            return Err(
-                "Production Automation start requires the configured live Linear credential".into(),
-            );
-        }
-        let repository = self.repository(parent_thread_id).await?;
+        let task_prompt = validation
+            .preview
+            .and_then(|preview| preview.rendered_prompt)
+            .ok_or("valid Automation profile is missing its rendered task prompt")?;
         let source_revision =
             repository_revision(&repository).map_err(|error| error.to_string())?;
         let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
@@ -1186,10 +1256,17 @@ impl OrchestraService {
         })
         .map_err(|error| error.to_string())?;
         self.automation_shutdown.track(&repository, &root.run_id);
-        if root.status == AutomationRootStatus::Suspended {
+        if root.status != AutomationRootStatus::Running
+            || root.reconciliation != AutomationReconciliationStatus::Complete
+        {
             root = self
                 .reconcile_automation(parent_thread_id, &root.run_id, profile_path, true)
                 .await?;
+            if root.status != AutomationRootStatus::Running
+                || root.reconciliation != AutomationReconciliationStatus::Complete
+            {
+                return Ok(root);
+            }
         }
         if profile_digest != root.profile_digest
             && root.profile_revision.pending_digest.as_deref() != Some(&profile_digest)
@@ -1198,44 +1275,151 @@ impl OrchestraService {
                 .stage_profile_revision(&mut root, &profile, &profile_digest)
                 .map_err(|error| error.to_string())?;
         }
-        let pending = intake
-            .issues
-            .into_iter()
-            .filter(|issue| !root.claims.values().any(|claim| claim.issue_id == issue.id))
-            .collect::<Vec<_>>();
-        if pending.is_empty() {
-            root.next_action = if intake.has_next_page {
-                "request the next bounded Linear candidate page".into()
-            } else {
-                "wait for an eligible Linear issue".into()
-            };
-            store.save(&mut root).map_err(|error| error.to_string())?;
+
+        if let Some(intent) = outstanding_dispatch_intent(&root) {
+            self.spawn_automation_dispatch(
+                parent_thread_id,
+                profile_path,
+                &repository,
+                &root.run_id,
+                intent,
+            );
             return Ok(root);
         }
 
+        let input_cursor = root.coordination.output_cursor.clone();
+        let intake = self
+            .read_linear_automation_with_profile(
+                &profile,
+                AutomationLinearReadKind::Candidates,
+                input_cursor.as_deref(),
+                Some(50),
+                None,
+            )
+            .await?;
+        let page = match intake.status {
+            AutomationLinearReadStatus::Ready => AutomationCoordinationPage::Ready {
+                expected_scan_revision: root.coordination.scan_revision,
+                input_cursor: input_cursor.as_deref(),
+                output_cursor: intake.end_cursor.as_deref(),
+                issues: &intake.issues,
+            },
+            AutomationLinearReadStatus::Skipped => AutomationCoordinationPage::Skipped {
+                expected_scan_revision: root.coordination.scan_revision,
+                input_cursor: input_cursor.as_deref(),
+                reason: &intake.next_action,
+            },
+        };
+        let plan = plan_coordination_page(&root, &profile, page, 1, unix_epoch_millis())
+            .map_err(|error| error.to_string())?
+            .with_task_prompt(&task_prompt);
+        let committed = store
+            .commit_coordination_plan(&mut root, &profile, plan)
+            .map_err(|error| error.to_string())?;
+        if let Some(intent) = committed.dispatch_intent {
+            self.spawn_automation_dispatch(
+                parent_thread_id,
+                profile_path,
+                &repository,
+                &root.run_id,
+                intent,
+            );
+        }
+        Ok(root)
+    }
+
+    fn spawn_automation_dispatch(
+        &self,
+        parent_thread_id: &str,
+        profile_path: &str,
+        repository: &Path,
+        run_id: &str,
+        intent: AutomationDispatchIntent,
+    ) {
+        if !self
+            .automation_dispatches
+            .try_track(repository, run_id, &intent.intent_id)
+        {
+            return;
+        }
         let service = self.clone();
         let parent_thread_id = parent_thread_id.to_owned();
         let profile_path = profile_path.to_owned();
+        let repository = repository.to_path_buf();
+        let run_id = run_id.to_owned();
         tokio::spawn(async move {
-            for issue in pending {
-                if let Err(error) = service
-                    .run_automation_fixture_inner(
-                        &parent_thread_id,
-                        &profile_path,
-                        issue,
-                        None,
-                        AutomationTrackerBackend::Live,
-                        None,
-                    )
-                    .await
-                {
-                    eprintln!("Production Automation issue execution failed: {error}");
-                }
+            let intent_id = intent.intent_id.clone();
+            let result = service
+                .execute_automation_dispatch(
+                    &parent_thread_id,
+                    &profile_path,
+                    &repository,
+                    &run_id,
+                    intent,
+                )
+                .await;
+            service
+                .automation_dispatches
+                .remove(&repository, &run_id, &intent_id);
+            if let Err(error) = result {
+                eprintln!("Production Automation dispatch `{intent_id}` failed: {error}");
             }
         });
-        root.next_action = "dispatch eligible live Linear issues".into();
-        store.save(&mut root).map_err(|error| error.to_string())?;
-        Ok(root)
+    }
+
+    async fn execute_automation_dispatch(
+        &self,
+        parent_thread_id: &str,
+        profile_path: &str,
+        repository: &Path,
+        run_id: &str,
+        intent: AutomationDispatchIntent,
+    ) -> Result<AutomationRootCheckpoint, String> {
+        let store =
+            AutomationRunStore::open(repository, run_id).map_err(|error| error.to_string())?;
+        let root = store.load().map_err(|error| error.to_string())?;
+        authorize_automation_root(&root, parent_thread_id)?;
+        let claim = root
+            .claims
+            .get(&intent.claim_id)
+            .cloned()
+            .ok_or_else(|| format!("Automation claim `{}` was not found", intent.claim_id))?;
+        let claim_profile = store
+            .load_profile_revision(&claim.profile_digest)
+            .map_err(|error| error.to_string())?;
+        let refresh = self
+            .read_linear_automation_with_profile(
+                &claim_profile,
+                AutomationLinearReadKind::Refresh,
+                None,
+                Some(1),
+                Some(&claim.issue_identifier),
+            )
+            .await?;
+        if refresh.status == AutomationLinearReadStatus::Skipped {
+            return Err(refresh.next_action);
+        }
+        let issue = refresh
+            .issues
+            .into_iter()
+            .find(|issue| issue.id == intent.issue_id)
+            .ok_or_else(|| {
+                format!(
+                    "Linear refresh did not return Automation issue `{}`",
+                    claim.issue_identifier
+                )
+            })?;
+        self.run_automation_fixture_inner(
+            parent_thread_id,
+            profile_path,
+            issue,
+            Some(intent.attempt),
+            AutomationTrackerBackend::Live,
+            None,
+            Some(run_id),
+            Some(intent),
+        )
+        .await
     }
 
     pub async fn run_automation_fixture(
@@ -1251,6 +1435,8 @@ impl OrchestraService {
             fixture_issue,
             attempt,
             AutomationTrackerBackend::Fixture,
+            None,
+            None,
             None,
         )
         .await
@@ -1278,6 +1464,8 @@ impl OrchestraService {
                     attempt,
                     AutomationTrackerBackend::Fixture,
                     Some(Arc::clone(&background_started)),
+                    None,
+                    None,
                 )
                 .await;
             let sender = background_started
@@ -1303,59 +1491,106 @@ impl OrchestraService {
         attempt: Option<u32>,
         tracker_backend: AutomationTrackerBackend,
         started: Option<AutomationStartSignal>,
+        preclaimed_run_id: Option<&str>,
+        preclaimed_intent: Option<AutomationDispatchIntent>,
     ) -> Result<AutomationRootCheckpoint, String> {
         let attempt = attempt.unwrap_or(1);
         if attempt == 0 {
             return Err("Automation attempt must be greater than zero".into());
         }
-        let validation = self
-            .validate_automation(
-                parent_thread_id,
-                profile_path,
-                fixture_issue.clone(),
-                Some(attempt),
-            )
-            .await?;
-        if !validation.valid {
-            return Err(format!(
-                "Automation profile is invalid: {}",
-                validation
-                    .diagnostics
-                    .iter()
-                    .map(|diagnostic| format!("{}: {}", diagnostic.path, diagnostic.message))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ));
-        }
-        let profile = validation
-            .profile
-            .ok_or("valid Automation profile is missing its canonical snapshot")?;
-        let profile_digest = validation
-            .profile_digest
-            .ok_or("valid Automation profile is missing its digest")?;
-        let task_prompt = validation
-            .preview
-            .and_then(|preview| preview.rendered_prompt)
-            .ok_or("valid Automation profile is missing its rendered task prompt")?;
         let repository = self.repository(parent_thread_id).await?;
         let source_revision =
             repository_revision(&repository).map_err(|error| error.to_string())?;
-        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
-            repository: &repository,
-            owner_thread_id: parent_thread_id,
-            source_revision: &source_revision,
-            profile: &profile,
-            profile_digest: &profile_digest,
-        })
-        .map_err(|error| error.to_string())?;
+        let (store, mut root, profile, profile_digest, task_prompt) =
+            match (preclaimed_intent.as_ref(), preclaimed_run_id) {
+                (Some(intent), Some(run_id)) => {
+                    let store = AutomationRunStore::open(&repository, run_id)
+                        .map_err(|error| error.to_string())?;
+                    let root = store.load().map_err(|error| error.to_string())?;
+                    authorize_automation_root(&root, parent_thread_id)?;
+                    let claim = root.claims.get(&intent.claim_id).ok_or_else(|| {
+                        format!("Automation claim `{}` was not found", intent.claim_id)
+                    })?;
+                    if claim.issue_id != intent.issue_id
+                        || claim.profile_digest != intent.profile_digest
+                    {
+                        return Err(
+                            "durable Automation dispatch intent does not match its pinned claim"
+                                .into(),
+                        );
+                    }
+                    if claim.task_prompt.is_empty() {
+                        return Err(
+                            "durable Automation claim is missing its pinned rendered prompt".into(),
+                        );
+                    }
+                    let profile = store
+                        .load_profile_revision(&intent.profile_digest)
+                        .map_err(|error| error.to_string())?;
+                    let task_prompt = claim.task_prompt.clone();
+                    (
+                        store,
+                        root,
+                        profile,
+                        intent.profile_digest.clone(),
+                        task_prompt,
+                    )
+                }
+                (None, None) => {
+                    let validation = self
+                        .validate_automation(
+                            parent_thread_id,
+                            profile_path,
+                            fixture_issue.clone(),
+                            Some(attempt),
+                        )
+                        .await?;
+                    if !validation.valid {
+                        return Err(format!(
+                            "Automation profile is invalid: {}",
+                            validation
+                                .diagnostics
+                                .iter()
+                                .map(|diagnostic| {
+                                    format!("{}: {}", diagnostic.path, diagnostic.message)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ));
+                    }
+                    let profile = validation
+                        .profile
+                        .ok_or("valid Automation profile is missing its canonical snapshot")?;
+                    let profile_digest = validation
+                        .profile_digest
+                        .ok_or("valid Automation profile is missing its digest")?;
+                    let task_prompt = validation
+                        .preview
+                        .and_then(|preview| preview.rendered_prompt)
+                        .ok_or("valid Automation profile is missing its rendered task prompt")?;
+                    let (store, root) = AutomationRunStore::start(AutomationRunStart {
+                        repository: &repository,
+                        owner_thread_id: parent_thread_id,
+                        source_revision: &source_revision,
+                        profile: &profile,
+                        profile_digest: &profile_digest,
+                    })
+                    .map_err(|error| error.to_string())?;
+                    (store, root, profile, profile_digest, task_prompt)
+                }
+                _ => return Err("incomplete preclaimed Automation dispatch identity".into()),
+            };
+        let source_revision = root.source_revision.clone();
         self.automation_shutdown.track(&repository, &root.run_id);
-        if profile_digest != root.profile_digest
+        if preclaimed_intent.is_none()
+            && profile_digest != root.profile_digest
             && root.profile_revision.pending_digest.as_deref() != Some(&profile_digest)
         {
             store
                 .stage_profile_revision(&mut root, &profile, &profile_digest)
                 .map_err(|error| error.to_string())?;
-        } else if profile_digest == root.profile_digest
+        } else if preclaimed_intent.is_none()
+            && profile_digest == root.profile_digest
             && root.profile_revision.status
                 != codex_orchestra_core::AutomationProfileRevisionStatus::Active
         {
@@ -1380,7 +1615,7 @@ impl OrchestraService {
             .terminal_states
             .iter()
             .any(|state| state.eq_ignore_ascii_case(&fixture_issue.state));
-        if tracker_terminal {
+        if tracker_terminal && preclaimed_intent.is_none() {
             if let Some(claim_id) = existing_claim_id {
                 store
                     .update_claim(&mut root, &claim_id, |claim| {
@@ -1401,34 +1636,68 @@ impl OrchestraService {
                 fixture_issue.identifier
             ));
         }
-        validate_fixture_eligibility(&dispatch_profile, &fixture_issue)?;
-        let coordination = store
-            .coordinate_fixture(
-                &mut root,
-                &profile,
-                std::slice::from_ref(&fixture_issue),
-                attempt,
-            )
-            .map_err(|error| error.to_string())?;
-        let (claim_id, is_new_claim, dispatch_reason) =
-            if let Some(claim_id) = coordination.dispatched_claim_ids.into_iter().next() {
-                (claim_id, true, "initial")
-            } else {
-                let claim_id = root
-                    .claims
-                    .values()
-                    .find(|claim| claim.issue_id == fixture_issue.id)
-                    .map(|claim| claim.claim_id.clone())
-                    .ok_or("fixture issue is not dispatchable under current Automation capacity")?;
-                let scheduled = store
-                    .dispatch_due_claim_work(&mut root, &claim_id, true, unix_epoch_millis())
+        let (claim_id, is_new_claim, dispatch_reason) = match preclaimed_intent.as_ref() {
+            Some(intent) => {
+                if existing_claim_id.as_deref() != Some(intent.claim_id.as_str())
+                    || intent.issue_id != fixture_issue.id
+                {
+                    return Err(
+                        "durable Automation dispatch intent does not match its claim".into(),
+                    );
+                }
+                let started_intent = store
+                    .start_dispatch_intent(
+                        &mut root,
+                        &intent.intent_id,
+                        !tracker_terminal,
+                        unix_epoch_millis(),
+                    )
                     .map_err(|error| error.to_string())?;
-                let reason = match scheduled.kind {
-                    AutomationRetryKind::Retry => "retry",
-                    AutomationRetryKind::Continuation => "continuation",
+                if started_intent.status == AutomationDispatchIntentStatus::Completed {
+                    return store.load().map_err(|error| error.to_string());
+                }
+                let (is_new_claim, reason) = match started_intent.kind {
+                    AutomationDispatchIntentKind::NewClaim => (
+                        root.claims[&started_intent.claim_id].issue_task.is_none(),
+                        "initial",
+                    ),
+                    AutomationDispatchIntentKind::Retry => (false, "retry"),
+                    AutomationDispatchIntentKind::Continuation => (false, "continuation"),
                 };
-                (claim_id, false, reason)
-            };
+                (started_intent.claim_id, is_new_claim, reason)
+            }
+            None => {
+                validate_fixture_eligibility(&dispatch_profile, &fixture_issue)?;
+                let coordination = store
+                    .coordinate_fixture(
+                        &mut root,
+                        &profile,
+                        std::slice::from_ref(&fixture_issue),
+                        attempt,
+                    )
+                    .map_err(|error| error.to_string())?;
+                if let Some(claim_id) = coordination.dispatched_claim_ids.into_iter().next() {
+                    (claim_id, true, "initial")
+                } else {
+                    let claim_id = root
+                        .claims
+                        .values()
+                        .find(|claim| claim.issue_id == fixture_issue.id)
+                        .map(|claim| claim.claim_id.clone())
+                        .ok_or(
+                            "fixture issue is not dispatchable under current Automation capacity",
+                        )?;
+                    let scheduled = store
+                        .dispatch_due_claim_work(&mut root, &claim_id, true, unix_epoch_millis())
+                        .map_err(|error| error.to_string())?;
+                    let reason = match scheduled.kind {
+                        AutomationRetryKind::Retry => "retry",
+                        AutomationRetryKind::Continuation => "continuation",
+                    };
+                    (claim_id, false, reason)
+                }
+            }
+        };
 
         if is_new_claim {
             store
@@ -1463,6 +1732,7 @@ impl OrchestraService {
                 Ok(path) => path,
                 Err(error) => {
                     fail_automation_claim(&store, &mut root, &claim_id, &error)?;
+                    complete_preclaimed_dispatch(&store, &mut root, preclaimed_intent.as_ref())?;
                     return Err(error);
                 }
             };
@@ -1473,8 +1743,15 @@ impl OrchestraService {
                 })
                 .map_err(|error| error.to_string())?;
 
-            let setup_succeeded = self
-                .run_automation_hook(
+            let setup_already_succeeded =
+                root.claims[&claim_id].hook_receipts.iter().any(|receipt| {
+                    receipt.kind == AutomationHookKind::AfterCreate
+                        && receipt.status == AutomationHookStatus::Succeeded
+                });
+            let setup_succeeded = if setup_already_succeeded {
+                true
+            } else {
+                self.run_automation_hook(
                     parent_thread_id,
                     &repository,
                     &store,
@@ -1484,7 +1761,8 @@ impl OrchestraService {
                     execution_profile.hooks.after_create.as_deref(),
                     execution_profile.hooks.timeout_ms,
                 )
-                .await?;
+                .await?
+            };
             if !setup_succeeded {
                 fail_automation_claim(&store, &mut root, &claim_id, "after_create hook failed")?;
                 store
@@ -1500,6 +1778,7 @@ impl OrchestraService {
                     &mut root,
                 )
                 .await?;
+                complete_preclaimed_dispatch(&store, &mut root, preclaimed_intent.as_ref())?;
                 return Err("after_create hook failed".into());
             }
 
@@ -1517,32 +1796,45 @@ impl OrchestraService {
                 "You are the persistent Issue task for `{}`. The native Orchestra runtime will execute the selected typed Workflow under this task after this initialization turn. Retain the issue context below and return exactly {{\"ready\":true}}.\n\n{}\n\nIssue snapshot:\n{}",
                 fixture_issue.identifier, execution_task_prompt, issue_json
             );
+            let task_name = format!("automation_{}", safe_task_name(&fixture_issue.identifier));
             let issue_handle = match self
                 .host
-                .spawn(SpawnRequest {
-                    parent_thread_id: parent_thread_id.into(),
-                    task_name: format!("automation_{}", safe_task_name(&fixture_issue.identifier)),
-                    prompt: bootstrap_prompt,
-                    skill_context: String::new(),
-                    cwd: worktree.clone(),
-                    model: config.model.clone(),
-                    reasoning_effort: config
-                        .reasoning_effort
-                        .clone()
-                        .map(|value| serde_json::to_value(value).unwrap_or(Value::Null))
-                        .and_then(|value| value.as_str().map(str::to_owned)),
-                    service_tier: config.service_tier.clone(),
-                    fork_turns: ForkTurns::None,
-                    allow_delegation: true,
-                    minimum_descendant_depth: 1,
-                })
-                .await
+                .resolve_spawned_agent(parent_thread_id, &task_name)
+                .await?
             {
-                Ok(handle) => handle,
-                Err(error) => {
-                    fail_automation_claim(&store, &mut root, &claim_id, &error)?;
-                    return Err(error);
-                }
+                Some(handle) => handle,
+                None => match self
+                    .host
+                    .spawn(SpawnRequest {
+                        parent_thread_id: parent_thread_id.into(),
+                        task_name,
+                        prompt: bootstrap_prompt,
+                        skill_context: String::new(),
+                        cwd: worktree.clone(),
+                        model: config.model.clone(),
+                        reasoning_effort: config
+                            .reasoning_effort
+                            .clone()
+                            .map(|value| serde_json::to_value(value).unwrap_or(Value::Null))
+                            .and_then(|value| value.as_str().map(str::to_owned)),
+                        service_tier: config.service_tier.clone(),
+                        fork_turns: ForkTurns::None,
+                        allow_delegation: true,
+                        minimum_descendant_depth: 1,
+                    })
+                    .await
+                {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        fail_automation_claim(&store, &mut root, &claim_id, &error)?;
+                        complete_preclaimed_dispatch(
+                            &store,
+                            &mut root,
+                            preclaimed_intent.as_ref(),
+                        )?;
+                        return Err(error);
+                    }
+                },
             };
             store
                 .update_claim(&mut root, &claim_id, |claim| {
@@ -1558,6 +1850,7 @@ impl OrchestraService {
                 );
                 fail_automation_claim(&store, &mut root, &claim_id, &error)?;
                 let _ = self.host.cancel(&issue_handle).await;
+                complete_preclaimed_dispatch(&store, &mut root, preclaimed_intent.as_ref())?;
                 return Err(error);
             }
             if initialized
@@ -1568,112 +1861,184 @@ impl OrchestraService {
             {
                 let error = "Issue task initialization returned an invalid readiness result";
                 fail_automation_claim(&store, &mut root, &claim_id, error)?;
+                complete_preclaimed_dispatch(&store, &mut root, preclaimed_intent.as_ref())?;
                 return Err(error.into());
             }
             (worktree, issue_handle)
         } else {
-            let claim = &root.claims[&claim_id];
+            let claim = root.claims[&claim_id].clone();
             let issue_handle = claim
                 .issue_task
                 .clone()
                 .ok_or("retained Automation claim is missing its native Issue task")?;
+            if preclaimed_intent
+                .as_ref()
+                .is_some_and(|intent| intent.kind == AutomationDispatchIntentKind::NewClaim)
+                && claim.workflow_run_id.is_none()
+            {
+                let initialized = self.host.wait(&issue_handle).await?;
+                if !matches!(initialized.status, AgentStatus::Completed)
+                    || initialized
+                        .final_response
+                        .as_deref()
+                        .and_then(|response| serde_json::from_str::<Value>(response).ok())
+                        != Some(json!({"ready": true}))
+                {
+                    let error = "retained Issue task did not complete Automation readiness";
+                    fail_automation_claim(&store, &mut root, &claim_id, error)?;
+                    complete_preclaimed_dispatch(&store, &mut root, preclaimed_intent.as_ref())?;
+                    return Err(error.into());
+                }
+            }
             (claim.worktree.clone(), issue_handle)
         };
 
-        let workflow_source = std::fs::read_to_string(&execution_profile.orchestra.workflow_path)
-            .map_err(|error| error.to_string())?;
-        if automation_source_sha256(&workflow_source) != execution_profile.orchestra.workflow_sha256
-        {
-            store
-                .schedule_claim_retry(
-                    &mut root,
-                    &claim_id,
-                    &execution_profile,
-                    unix_epoch_millis(),
-                    "pinned Automation workflow source changed",
-                )
-                .map_err(|error| error.to_string())?;
-            root.next_action = format!(
-                "claim `{claim_id}` is recoverable after restoring its pinned workflow source"
-            );
-            store.save(&mut root).map_err(|error| error.to_string())?;
-            return Ok(root);
-        }
-        let plan = compile_workflow(&workflow_source).map_err(|error| error.to_string())?;
-        let pre_run_succeeded = self
-            .run_automation_hook(
-                parent_thread_id,
-                &repository,
-                &store,
-                &mut root,
-                &claim_id,
-                AutomationHookKind::BeforeRun,
-                execution_profile.hooks.before_run.as_deref(),
-                execution_profile.hooks.timeout_ms,
-            )
-            .await?;
-        if !pre_run_succeeded {
-            store
-                .schedule_claim_retry(
-                    &mut root,
-                    &claim_id,
-                    &execution_profile,
-                    unix_epoch_millis(),
-                    "before_run hook failed",
-                )
-                .map_err(|error| error.to_string())?;
-            root.next_action = format!("claim `{claim_id}` is waiting for hook retry");
-            store.save(&mut root).map_err(|error| error.to_string())?;
-            return Ok(root);
-        }
         let fixture_tracker_state = fixture_issue.state.clone();
-        let normalized_inputs = json!({
-            "issue": fixture_issue,
-            "task_prompt": execution_task_prompt,
-            "automation": {
-                "profileDigest": execution_profile_digest,
-                "claimId": claim_id,
-                "attempt": root.claims[&claim_id].workflow_invocations.saturating_add(1),
-                "reason": dispatch_reason,
-            },
+        let retained_workflow_run_id = preclaimed_intent
+            .as_ref()
+            .and_then(|_| root.claims[&claim_id].workflow_run_id.clone());
+        let retained_workflow_exists = retained_workflow_run_id.as_ref().is_some_and(|run_id| {
+            worktree
+                .join(".codex/orchestra/runs")
+                .join(run_id)
+                .join("state.json")
+                .is_file()
         });
-        store
-            .update_claim(&mut root, &claim_id, |claim| {
-                claim.status = AutomationClaimStatus::Running;
-                claim.next_action = "execute selected typed Workflow in Issue task".into();
-            })
-            .map_err(|error| error.to_string())?;
-        let observed_store = AutomationRunStore::open(&repository, &root.run_id)
-            .map_err(|error| error.to_string())?;
-        let observed_claim = claim_id.clone();
-        let observed_started = started.clone();
-        let outcome = self
-            .runtime
-            .run_with_inputs_observed(
-                &worktree,
-                &issue_handle.thread_id,
-                plan,
-                Some(&normalized_inputs),
-                move |checkpoint| {
-                    let mut automation =
-                        observed_store.load().map_err(|error| error.to_string())?;
-                    observed_store
-                        .update_claim(&mut automation, &observed_claim, |claim| {
-                            claim.workflow_run_id = Some(checkpoint.run_id.clone());
-                            claim.workflow_status = Some(checkpoint.status.clone());
-                            claim.next_action = "observe Workflow checkpoint".into();
-                        })
-                        .map_err(|error| error.to_string())?;
-                    if let Some(started) = observed_started.as_ref() {
-                        let sender = started.lock().ok().and_then(|mut sender| sender.take());
-                        if let Some(sender) = sender {
-                            let _ = sender.send(Ok(automation.clone()));
-                        }
-                    }
-                    Ok(())
+        let outcome = if retained_workflow_exists {
+            let workflow_run_id = retained_workflow_run_id
+                .as_deref()
+                .expect("retained workflow existence requires its id");
+            self.runtime.resume(&worktree, workflow_run_id).await
+        } else {
+            let workflow_source =
+                std::fs::read_to_string(&execution_profile.orchestra.workflow_path)
+                    .map_err(|error| error.to_string())?;
+            if automation_source_sha256(&workflow_source)
+                != execution_profile.orchestra.workflow_sha256
+            {
+                store
+                    .schedule_claim_retry(
+                        &mut root,
+                        &claim_id,
+                        &execution_profile,
+                        unix_epoch_millis(),
+                        "pinned Automation workflow source changed",
+                    )
+                    .map_err(|error| error.to_string())?;
+                root.next_action = format!(
+                    "claim `{claim_id}` is recoverable after restoring its pinned workflow source"
+                );
+                store.save(&mut root).map_err(|error| error.to_string())?;
+                complete_preclaimed_dispatch(&store, &mut root, preclaimed_intent.as_ref())?;
+                return Ok(root);
+            }
+            let plan = compile_workflow(&workflow_source).map_err(|error| error.to_string())?;
+            let pre_run_succeeded = self
+                .run_automation_hook(
+                    parent_thread_id,
+                    &repository,
+                    &store,
+                    &mut root,
+                    &claim_id,
+                    AutomationHookKind::BeforeRun,
+                    execution_profile.hooks.before_run.as_deref(),
+                    execution_profile.hooks.timeout_ms,
+                )
+                .await?;
+            if !pre_run_succeeded {
+                store
+                    .schedule_claim_retry(
+                        &mut root,
+                        &claim_id,
+                        &execution_profile,
+                        unix_epoch_millis(),
+                        "before_run hook failed",
+                    )
+                    .map_err(|error| error.to_string())?;
+                root.next_action = format!("claim `{claim_id}` is waiting for hook retry");
+                store.save(&mut root).map_err(|error| error.to_string())?;
+                complete_preclaimed_dispatch(&store, &mut root, preclaimed_intent.as_ref())?;
+                return Ok(root);
+            }
+            let normalized_inputs = json!({
+                "issue": fixture_issue,
+                "task_prompt": execution_task_prompt,
+                "automation": {
+                    "profileDigest": execution_profile_digest,
+                    "claimId": claim_id,
+                    "attempt": root.claims[&claim_id].workflow_invocations.saturating_add(1),
+                    "reason": dispatch_reason,
                 },
-            )
-            .await;
+            });
+            let reserved_workflow_run_id = if let Some(intent) = preclaimed_intent.as_ref() {
+                let run_id = retained_workflow_run_id
+                    .clone()
+                    .unwrap_or_else(|| automation_workflow_run_id(&root.run_id, &intent.intent_id));
+                store
+                    .update_claim(&mut root, &claim_id, |claim| {
+                        claim.workflow_run_id = Some(run_id.clone());
+                        claim.workflow_status = Some(RunStatus::Pending);
+                        claim.status = AutomationClaimStatus::Running;
+                        claim.next_action = "create or resume reserved Workflow Run".into();
+                    })
+                    .map_err(|error| error.to_string())?;
+                Some(run_id)
+            } else {
+                store
+                    .update_claim(&mut root, &claim_id, |claim| {
+                        claim.status = AutomationClaimStatus::Running;
+                        claim.next_action = "execute selected typed Workflow in Issue task".into();
+                    })
+                    .map_err(|error| error.to_string())?;
+                None
+            };
+            let observed_store = AutomationRunStore::open(&repository, &root.run_id)
+                .map_err(|error| error.to_string())?;
+            let observed_claim = claim_id.clone();
+            let observed_started = started.clone();
+            let on_created = move |checkpoint: &RunCheckpoint| {
+                let mut automation = observed_store.load().map_err(|error| error.to_string())?;
+                observed_store
+                    .update_claim(&mut automation, &observed_claim, |claim| {
+                        claim.workflow_run_id = Some(checkpoint.run_id.clone());
+                        claim.workflow_status = Some(checkpoint.status.clone());
+                        claim.next_action = "observe Workflow checkpoint".into();
+                    })
+                    .map_err(|error| error.to_string())?;
+                if let Some(started) = observed_started.as_ref() {
+                    let sender = started.lock().ok().and_then(|mut sender| sender.take());
+                    if let Some(sender) = sender {
+                        let _ = sender.send(Ok(automation.clone()));
+                    }
+                }
+                Ok(())
+            };
+            match reserved_workflow_run_id {
+                Some(run_id) => {
+                    self.runtime
+                        .run_with_inputs_observed_as(
+                            &worktree,
+                            &issue_handle.thread_id,
+                            &run_id,
+                            plan,
+                            Some(&normalized_inputs),
+                            on_created,
+                        )
+                        .await
+                }
+                None => {
+                    self.runtime
+                        .run_with_inputs_observed(
+                            &worktree,
+                            &issue_handle.thread_id,
+                            plan,
+                            Some(&normalized_inputs),
+                            on_created,
+                        )
+                        .await
+                }
+            }
+        };
         // The observer persists each typed Workflow checkpoint and advances the
         // Automation lease revision. Continue from that authoritative snapshot
         // so post-run hooks and reconciliation do not write through a stale fence.
@@ -1686,6 +2051,16 @@ impl OrchestraService {
                 )
             })
         {
+            if root.claims.get(&claim_id).is_some_and(|claim| {
+                matches!(
+                    claim.status,
+                    AutomationClaimStatus::Completed
+                        | AutomationClaimStatus::Cancelled
+                        | AutomationClaimStatus::Failed
+                )
+            }) {
+                complete_preclaimed_dispatch(&store, &mut root, preclaimed_intent.as_ref())?;
+            }
             return Ok(root);
         }
         let outcome = match outcome {
@@ -1721,6 +2096,7 @@ impl OrchestraService {
                 store
                     .save(&mut root)
                     .map_err(|storage| storage.to_string())?;
+                complete_preclaimed_dispatch(&store, &mut root, preclaimed_intent.as_ref())?;
                 return Ok(root);
             }
         };
@@ -1761,6 +2137,7 @@ impl OrchestraService {
                 .map_err(|error| error.to_string())?;
             root.next_action = format!("claim `{claim_id}` is waiting for hook retry");
             store.save(&mut root).map_err(|error| error.to_string())?;
+            complete_preclaimed_dispatch(&store, &mut root, preclaimed_intent.as_ref())?;
             return Ok(root);
         }
         let mut effect_statuses = Vec::new();
@@ -1908,6 +2285,7 @@ impl OrchestraService {
         }
         root.next_action = root.claims[&claim_id].next_action.clone();
         store.save(&mut root).map_err(|error| error.to_string())?;
+        complete_preclaimed_dispatch(&store, &mut root, preclaimed_intent.as_ref())?;
         Ok(root)
     }
 
@@ -2071,7 +2449,7 @@ impl OrchestraService {
         store
             .complete_claim_cancellation(&mut root, claim_id, descendants_cancelled)
             .map_err(|error| error.to_string())?;
-        self.cleanup_eligible_automation_claims(parent_thread_id, &repository, &store, &mut root)
+        self.cleanup_eligible_automation_claims(parent_thread_id, repository, &store, &mut root)
             .await?;
         Ok(())
     }
@@ -2128,6 +2506,32 @@ impl OrchestraService {
         Ok(root)
     }
 
+    pub async fn refresh_automation(
+        &self,
+        parent_thread_id: &str,
+        run_id: &str,
+        profile_path: &str,
+    ) -> Result<AutomationRootCheckpoint, String> {
+        let repository = self.repository(parent_thread_id).await?;
+        let store =
+            AutomationRunStore::open(&repository, run_id).map_err(|error| error.to_string())?;
+        let root = store.load().map_err(|error| error.to_string())?;
+        authorize_automation_root(&root, parent_thread_id)?;
+        if root.status == AutomationRootStatus::Running
+            && root.reconciliation == AutomationReconciliationStatus::Complete
+        {
+            let refreshed = self
+                .start_automation(parent_thread_id, profile_path)
+                .await?;
+            if refreshed.run_id != run_id {
+                return Err("healthy Automation refresh resolved a different Root Run".into());
+            }
+            return Ok(refreshed);
+        }
+        self.reconcile_automation(parent_thread_id, run_id, profile_path, false)
+            .await
+    }
+
     pub async fn reconcile_automation(
         &self,
         parent_thread_id: &str,
@@ -2179,58 +2583,69 @@ impl OrchestraService {
                 created_at: None,
                 updated_at: None,
             });
-        let validation = self
+        match self
             .validate_automation(parent_thread_id, profile_path, fixture, None)
-            .await?;
-        if !validation.valid {
-            let diagnostics = validation
-                .diagnostics
-                .iter()
-                .map(|diagnostic| format!("{}: {}", diagnostic.path, diagnostic.message))
-                .collect::<Vec<_>>();
-            store
-                .reject_profile_revision(
-                    &mut root,
-                    validation.profile_digest.as_deref(),
-                    &diagnostics,
-                )
-                .map_err(|error| error.to_string())?;
-            return Ok(root);
-        }
-        let candidate_profile = validation
-            .profile
-            .ok_or("valid Automation profile is missing its canonical snapshot")?;
-        let candidate_digest = validation
-            .profile_digest
-            .ok_or("valid Automation profile is missing its digest")?;
-        if candidate_digest != root.profile_digest
-            && root.profile_revision.pending_digest.as_deref() != Some(&candidate_digest)
+            .await
         {
-            if let Err(error) =
-                store.stage_profile_revision(&mut root, &candidate_profile, &candidate_digest)
-            {
-                if matches!(
-                    error,
-                    codex_orchestra_core::AutomationRunError::ProfileProjectMismatch
-                ) {
+            Ok(validation) if validation.valid => {
+                let candidate_profile = validation
+                    .profile
+                    .ok_or("valid Automation profile is missing its canonical snapshot")?;
+                let candidate_digest = validation
+                    .profile_digest
+                    .ok_or("valid Automation profile is missing its digest")?;
+                if candidate_digest != root.profile_digest
+                    && root.profile_revision.pending_digest.as_deref() != Some(&candidate_digest)
+                {
+                    if let Err(error) = store.stage_profile_revision(
+                        &mut root,
+                        &candidate_profile,
+                        &candidate_digest,
+                    ) {
+                        if matches!(
+                            error,
+                            codex_orchestra_core::AutomationRunError::ProfileProjectMismatch
+                        ) {
+                            store
+                                .reject_profile_revision(
+                                    &mut root,
+                                    Some(&candidate_digest),
+                                    &["tracker.projectSlug: cannot change for a resident Root Run"
+                                        .into()],
+                                )
+                                .map_err(|storage| storage.to_string())?;
+                        } else {
+                            return Err(error.to_string());
+                        }
+                    }
+                } else if candidate_digest == root.profile_digest
+                    && root.profile_revision.status
+                        != codex_orchestra_core::AutomationProfileRevisionStatus::Active
+                {
                     store
-                        .reject_profile_revision(
-                            &mut root,
-                            Some(&candidate_digest),
-                            &["tracker.projectSlug: cannot change for a resident Root Run".into()],
-                        )
-                        .map_err(|storage| storage.to_string())?;
-                    return Ok(root);
+                        .confirm_active_profile(&mut root)
+                        .map_err(|error| error.to_string())?;
                 }
-                return Err(error.to_string());
             }
-        } else if candidate_digest == root.profile_digest
-            && root.profile_revision.status
-                != codex_orchestra_core::AutomationProfileRevisionStatus::Active
-        {
-            store
-                .confirm_active_profile(&mut root)
-                .map_err(|error| error.to_string())?;
+            Ok(validation) => {
+                let diagnostics = validation
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| format!("{}: {}", diagnostic.path, diagnostic.message))
+                    .collect::<Vec<_>>();
+                store
+                    .reject_profile_revision(
+                        &mut root,
+                        validation.profile_digest.as_deref(),
+                        &diagnostics,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            Err(error) => {
+                store
+                    .reject_profile_revision(&mut root, None, &[error])
+                    .map_err(|storage| storage.to_string())?;
+            }
         }
 
         if root.status == AutomationRootStatus::Running {
@@ -3267,6 +3682,45 @@ fn fail_automation_claim(
     store.save(root).map_err(|storage| storage.to_string())
 }
 
+fn outstanding_dispatch_intent(
+    root: &AutomationRootCheckpoint,
+) -> Option<AutomationDispatchIntent> {
+    root.coordination
+        .dispatch_intent
+        .as_ref()
+        .filter(|intent| intent.status != AutomationDispatchIntentStatus::Completed)
+        .cloned()
+}
+
+fn automation_workflow_run_id(root_run_id: &str, intent_id: &str) -> String {
+    let digest = automation_source_sha256(&format!("{root_run_id}\0{intent_id}"));
+    format!("automation-{digest}")
+}
+
+fn complete_preclaimed_dispatch(
+    store: &AutomationRunStore,
+    root: &mut AutomationRootCheckpoint,
+    intent: Option<&AutomationDispatchIntent>,
+) -> Result<(), String> {
+    let Some(intent) = intent else {
+        return Ok(());
+    };
+    if root
+        .coordination
+        .dispatch_intent
+        .as_ref()
+        .is_some_and(|stored| {
+            stored.intent_id == intent.intent_id
+                && stored.status == AutomationDispatchIntentStatus::Started
+        })
+    {
+        store
+            .complete_dispatch_intent(root, &intent.intent_id)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn safe_task_name(identifier: &str) -> String {
     identifier
         .chars()
@@ -3826,9 +4280,113 @@ fn reject_existing_root_run(repository: &Path, parent_thread_id: &str) -> Result
     Ok(())
 }
 
+fn find_task_automation_root(
+    repository: &Path,
+    parent_thread_id: &str,
+) -> Result<Option<AutomationRootCheckpoint>, String> {
+    const MAX_AUTOMATION_ROOTS: usize = 256;
+
+    let runs = repository.join(".codex/orchestra/runs");
+    let entries = match std::fs::read_dir(&runs) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut roots = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    roots.retain(|root| root.join("automation-state.json").is_file());
+    roots.sort();
+    if roots.len() > MAX_AUTOMATION_ROOTS {
+        return Err(format!(
+            "Automation root discovery exceeds the bounded limit of {MAX_AUTOMATION_ROOTS}"
+        ));
+    }
+
+    let mut owned = Vec::new();
+    for root_path in roots {
+        let run_id = root_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or("Automation Root Run path is not valid UTF-8")?;
+        let store =
+            AutomationRunStore::open(repository, run_id).map_err(|error| error.to_string())?;
+        let root = store.load().map_err(|error| error.to_string())?;
+        if root.owner_thread_id == parent_thread_id
+            && matches!(
+                root.status,
+                AutomationRootStatus::Running | AutomationRootStatus::Suspended
+            )
+        {
+            owned.push(root);
+        }
+    }
+    match owned.len() {
+        0 => Ok(None),
+        1 => Ok(owned.pop()),
+        count => Err(format!(
+            "task owns {count} active Automation Root Runs; expected at most one"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automation_dispatch_fence_allows_one_owner_until_release() {
+        let fence = AutomationDispatchFence::default();
+        let repository = Path::new("/workspace/orchestra");
+        assert!(fence.try_track(repository, "automation-1", "intent-1"));
+        assert!(!fence.try_track(repository, "automation-1", "intent-1"));
+        assert!(fence.try_track(repository, "automation-1", "intent-2"));
+        fence.remove(repository, "automation-1", "intent-1");
+        assert!(fence.try_track(repository, "automation-1", "intent-1"));
+    }
+
+    #[test]
+    fn workflow_run_identity_is_stable_per_dispatch_intent() {
+        let first = automation_workflow_run_id("root-1", "intent-1");
+        assert_eq!(first, automation_workflow_run_id("root-1", "intent-1"));
+        assert_ne!(first, automation_workflow_run_id("root-1", "intent-2"));
+        assert!(first.len() <= 128);
+        assert!(
+            first
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        );
+    }
+
+    #[test]
+    fn task_automation_root_discovery_is_owner_scoped() {
+        let repository = tempfile::tempdir().unwrap();
+        let profile = linear_mutation_profile("project-1");
+        let profile_digest =
+            codex_orchestra_core::canonical_sha256(&serde_json::to_value(&profile).unwrap())
+                .unwrap();
+        let (_, expected) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "task-1",
+            source_revision: "revision-1",
+            profile: &profile,
+            profile_digest: &profile_digest,
+        })
+        .unwrap();
+
+        assert_eq!(
+            find_task_automation_root(repository.path(), "task-1")
+                .unwrap()
+                .map(|root| root.run_id),
+            Some(expected.run_id)
+        );
+        assert!(
+            find_task_automation_root(repository.path(), "other-task")
+                .unwrap()
+                .is_none()
+        );
+    }
 
     fn linear_mutation_profile(project_id: &str) -> AutomationProfile {
         serde_json::from_value(json!({

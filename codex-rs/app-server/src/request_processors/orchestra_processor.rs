@@ -270,12 +270,7 @@ impl OrchestraRequestProcessor {
         params: AutomationReconcileParams,
     ) -> Result<AutomationRunResponse, JSONRPCErrorError> {
         self.service
-            .reconcile_automation(
-                &params.thread_id,
-                &params.run_id,
-                &params.profile_path,
-                false,
-            )
+            .refresh_automation(&params.thread_id, &params.run_id, &params.profile_path)
             .await
             .map(|run| AutomationRunResponse {
                 run: project_automation_run(run),
@@ -563,6 +558,67 @@ fn project_automation_run(
                 protocol::AutomationReconciliationStatus::Blocked
             }
         },
+        coordination: protocol::AutomationCoordinationProjection {
+            cycle: checkpoint.coordination.cycle,
+            scan_revision: checkpoint.coordination.scan_revision,
+            input_cursor: checkpoint.coordination.input_cursor.clone(),
+            output_cursor: checkpoint.coordination.output_cursor.clone(),
+            intake_status: match checkpoint.coordination.intake_status {
+                core::AutomationCoordinationIntakeStatus::NotStarted => {
+                    protocol::AutomationCoordinationIntakeStatus::NotStarted
+                }
+                core::AutomationCoordinationIntakeStatus::Ready => {
+                    protocol::AutomationCoordinationIntakeStatus::Ready
+                }
+                core::AutomationCoordinationIntakeStatus::Skipped => {
+                    protocol::AutomationCoordinationIntakeStatus::Skipped
+                }
+            },
+            page_digest: checkpoint.coordination.page_digest.clone(),
+            started_at_ms: checkpoint.coordination.started_at_ms,
+            completed_at_ms: checkpoint.coordination.completed_at_ms,
+            error: checkpoint
+                .coordination
+                .error
+                .clone()
+                .map(automation_bounded_text),
+            next_action: automation_bounded_text(checkpoint.coordination.next_action.clone()),
+            dispatch_intent: checkpoint
+                .coordination
+                .dispatch_intent
+                .clone()
+                .map(|intent| protocol::AutomationDispatchIntentProjection {
+                    intent_id: intent.intent_id,
+                    claim_id: intent.claim_id,
+                    issue_id: intent.issue_id,
+                    kind: match intent.kind {
+                        core::AutomationDispatchIntentKind::NewClaim => {
+                            protocol::AutomationDispatchIntentKind::NewClaim
+                        }
+                        core::AutomationDispatchIntentKind::Retry => {
+                            protocol::AutomationDispatchIntentKind::Retry
+                        }
+                        core::AutomationDispatchIntentKind::Continuation => {
+                            protocol::AutomationDispatchIntentKind::Continuation
+                        }
+                    },
+                    status: match intent.status {
+                        core::AutomationDispatchIntentStatus::Pending => {
+                            protocol::AutomationDispatchIntentStatus::Pending
+                        }
+                        core::AutomationDispatchIntentStatus::Started => {
+                            protocol::AutomationDispatchIntentStatus::Started
+                        }
+                        core::AutomationDispatchIntentStatus::Completed => {
+                            protocol::AutomationDispatchIntentStatus::Completed
+                        }
+                    },
+                    attempt: intent.attempt,
+                    profile_digest: intent.profile_digest,
+                    created_at_ms: intent.created_at_ms,
+                    ready_at_ms: intent.ready_at_ms,
+                }),
+        },
         queue_counts: protocol::AutomationQueueCounts {
             queued: queue_counts.queued,
             running: queue_counts.running,
@@ -584,6 +640,11 @@ fn project_automation_run(
                 tracker_state: claim.tracker_state,
                 priority: claim.priority,
                 attempt: claim.attempt,
+                workflow_invocations: claim.workflow_invocations,
+                turns_in_window: claim.turns_in_window,
+                continuation_count: claim.continuation_count,
+                retry_attempt: claim.retry_attempt,
+                last_progress_at_ms: claim.last_progress_at_ms,
                 profile_digest: claim.profile_digest,
                 profile_revision: claim.profile_revision,
                 status: match claim.status {
@@ -1274,7 +1335,7 @@ fn bounded_text(mut text: String) -> String {
         end -= 1;
     }
     text.truncate(end);
-    text.push_str("…");
+    text.push('…');
     text
 }
 
@@ -1626,10 +1687,33 @@ Implement {{ issue.identifier }}: {{ issue.title }}
             profile_digest: &profile_digest,
         })
         .unwrap();
-        let coordinated = store
-            .coordinate_fixture(&mut root, &profile, std::slice::from_ref(&issue), 1)
+        let task_prompt = validation
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.rendered_prompt.clone())
             .unwrap();
-        let claim_id = coordinated.dispatched_claim_ids[0].clone();
+        let coordination_plan = core::plan_coordination_page(
+            &root,
+            &profile,
+            core::AutomationCoordinationPage::Ready {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                output_cursor: None,
+                issues: std::slice::from_ref(&issue),
+            },
+            1,
+            40,
+        )
+        .unwrap()
+        .with_task_prompt(&task_prompt);
+        let intent = store
+            .commit_coordination_plan(&mut root, &profile, coordination_plan)
+            .unwrap();
+        let intent = intent.dispatch_intent.unwrap();
+        let claim_id = intent.claim_id.clone();
+        store
+            .start_dispatch_intent(&mut root, &intent.intent_id, true, 41)
+            .unwrap();
         let issue_task = AgentHandle {
             thread_id: "issue-task-42".into(),
             task_path: "automation_orc_42".into(),
@@ -1642,11 +1726,6 @@ Implement {{ issue.identifier }}: {{ issue.title }}
             .update_claim(&mut root, &claim_id, |claim| {
                 claim.issue_task = Some(issue_task.clone());
                 claim.status = core::AutomationClaimStatus::Running;
-                claim.task_prompt = validation
-                    .preview
-                    .as_ref()
-                    .and_then(|preview| preview.rendered_prompt.clone())
-                    .unwrap();
             })
             .unwrap();
         let first_steering = store
@@ -1732,10 +1811,24 @@ Implement {{ issue.identifier }}: {{ issue.title }}
         store
             .record_completed_invocation(&mut root, &claim_id, &profile, false, 42)
             .unwrap();
+        store
+            .complete_dispatch_intent(&mut root, &intent.intent_id)
+            .unwrap();
 
         let projection = project_automation_run(root);
         let claim = &projection.claims[0];
         assert_eq!(projection.owner_thread_id, "automation-task-42");
+        assert_eq!(projection.coordination.scan_revision, 1);
+        assert_eq!(
+            projection
+                .coordination
+                .dispatch_intent
+                .as_ref()
+                .unwrap()
+                .status,
+            protocol::AutomationDispatchIntentStatus::Completed
+        );
+        assert_eq!(claim.workflow_invocations, 1);
         assert_eq!(
             claim.issue_task.as_ref().unwrap().thread_id,
             "issue-task-42"

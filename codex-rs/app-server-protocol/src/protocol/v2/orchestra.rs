@@ -296,6 +296,81 @@ pub struct AutomationQueueItemProjection {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct AutomationCoordinationProjection {
+    pub cycle: u64,
+    pub scan_revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output_cursor: Option<String>,
+    pub intake_status: AutomationCoordinationIntakeStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub page_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub started_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub completed_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<OrchestraBoundedText>,
+    pub next_action: OrchestraBoundedText,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dispatch_intent: Option<AutomationDispatchIntentProjection>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationDispatchIntentProjection {
+    pub intent_id: String,
+    pub claim_id: String,
+    pub issue_id: String,
+    pub kind: AutomationDispatchIntentKind,
+    pub status: AutomationDispatchIntentStatus,
+    pub attempt: u32,
+    pub profile_digest: String,
+    pub created_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ready_at_ms: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum AutomationCoordinationIntakeStatus {
+    NotStarted,
+    Ready,
+    Skipped,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum AutomationDispatchIntentKind {
+    NewClaim,
+    Retry,
+    Continuation,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum AutomationDispatchIntentStatus {
+    Pending,
+    Started,
+    Completed,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct AutomationRunProjection {
     pub schema_version: u32,
     pub run_id: String,
@@ -316,6 +391,7 @@ pub struct AutomationRunProjection {
     pub revision: u64,
     pub status: AutomationRootStatus,
     pub reconciliation: AutomationReconciliationStatus,
+    pub coordination: AutomationCoordinationProjection,
     pub queue_counts: AutomationQueueCounts,
     pub claims_total: u32,
     pub claims: Vec<AutomationIssueClaimProjection>,
@@ -337,6 +413,13 @@ pub struct AutomationIssueClaimProjection {
     #[ts(optional)]
     pub priority: Option<i64>,
     pub attempt: u32,
+    pub workflow_invocations: u32,
+    pub turns_in_window: u32,
+    pub continuation_count: u32,
+    pub retry_attempt: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_progress_at_ms: Option<u64>,
     pub profile_digest: String,
     pub profile_revision: u64,
     pub status: AutomationClaimStatus,
@@ -843,6 +926,11 @@ mod automation_protocol_tests {
             tracker_state: "Todo".into(),
             priority: None,
             attempt: 1,
+            workflow_invocations: 2,
+            turns_in_window: 1,
+            continuation_count: 0,
+            retry_attempt: 0,
+            last_progress_at_ms: Some(42),
             profile_digest: "profile-sha".into(),
             profile_revision: 1,
             status: AutomationClaimStatus::Running,
