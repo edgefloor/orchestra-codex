@@ -42,6 +42,7 @@ use codex_orchestra_core::AutomationReconciliationStatus;
 use codex_orchestra_core::AutomationRetryKind;
 use codex_orchestra_core::AutomationRootCheckpoint;
 use codex_orchestra_core::AutomationRootStatus;
+use codex_orchestra_core::AutomationRunError;
 use codex_orchestra_core::AutomationRunStart;
 use codex_orchestra_core::AutomationRunStore;
 use codex_orchestra_core::AutomationSecretKind;
@@ -1350,7 +1351,7 @@ impl OrchestraService {
         tokio::spawn(async move {
             let intent_id = intent.intent_id.clone();
             let result = service
-                .execute_automation_dispatch(
+                .execute_automation_dispatch_with_recovery(
                     &parent_thread_id,
                     &profile_path,
                     &repository,
@@ -1358,13 +1359,47 @@ impl OrchestraService {
                     intent,
                 )
                 .await;
-            service
-                .automation_dispatches
-                .remove(&repository, &run_id, &intent_id);
             if let Err(error) = result {
                 eprintln!("Production Automation dispatch `{intent_id}` failed: {error}");
             }
+            service
+                .automation_dispatches
+                .remove(&repository, &run_id, &intent_id);
         });
+    }
+
+    async fn execute_automation_dispatch_with_recovery(
+        &self,
+        parent_thread_id: &str,
+        profile_path: &str,
+        repository: &Path,
+        run_id: &str,
+        intent: AutomationDispatchIntent,
+    ) -> Result<AutomationRootCheckpoint, String> {
+        let intent_id = intent.intent_id.clone();
+        let claim_id = intent.claim_id.clone();
+        match self
+            .execute_automation_dispatch(parent_thread_id, profile_path, repository, run_id, intent)
+            .await
+        {
+            Ok(root) => Ok(root),
+            Err(error) => {
+                let diagnostic = bounded_automation_dispatch_diagnostic(&error);
+                record_automation_dispatch_failure(
+                    repository,
+                    run_id,
+                    &intent_id,
+                    &claim_id,
+                    &error,
+                )
+                .map_err(|storage_error| {
+                    bounded_automation_dispatch_diagnostic(&format!(
+                        "{diagnostic}; durable failure recording failed without replacing the prior checkpoint: {storage_error}"
+                    ))
+                })?;
+                Err(diagnostic)
+            }
+        }
     }
 
     async fn execute_automation_dispatch(
@@ -3721,6 +3756,50 @@ fn complete_preclaimed_dispatch(
     Ok(())
 }
 
+fn record_automation_dispatch_failure(
+    repository: &Path,
+    run_id: &str,
+    intent_id: &str,
+    claim_id: &str,
+    error: &str,
+) -> Result<(), String> {
+    for attempt in 0..2 {
+        let store =
+            AutomationRunStore::open(repository, run_id).map_err(|error| error.to_string())?;
+        let mut root = store.load().map_err(|error| error.to_string())?;
+        if root
+            .coordination
+            .dispatch_intent
+            .as_ref()
+            .is_some_and(|intent| {
+                intent.intent_id == intent_id
+                    && intent.claim_id == claim_id
+                    && intent.status == AutomationDispatchIntentStatus::Completed
+            })
+        {
+            return Ok(());
+        }
+        match store.record_dispatch_failure(&mut root, intent_id, claim_id, error) {
+            Ok(_) => return Ok(()),
+            Err(AutomationRunError::StaleLease { .. }) if attempt == 0 => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    unreachable!("bounded dispatch-failure persistence retry exhausted without returning")
+}
+
+fn bounded_automation_dispatch_diagnostic(text: &str) -> String {
+    const MAX_BYTES: usize = 512;
+    if text.len() <= MAX_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_BYTES.saturating_sub('…'.len_utf8());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
 fn safe_task_name(identifier: &str) -> String {
     identifier
         .chars()
@@ -4357,6 +4436,133 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         );
+    }
+
+    #[test]
+    fn dispatch_failure_diagnostic_is_utf8_bounded() {
+        let diagnostic = bounded_automation_dispatch_diagnostic(&"é".repeat(400));
+        assert!(diagnostic.len() <= 512);
+        assert!(diagnostic.ends_with('…'));
+    }
+
+    fn background_dispatch_fixture() -> (
+        tempfile::TempDir,
+        AutomationRunStore,
+        AutomationRootCheckpoint,
+        AutomationDispatchIntent,
+        AutomationProfile,
+    ) {
+        let repository = tempfile::tempdir().unwrap();
+        let mut profile = linear_mutation_profile("project-1");
+        profile.tracker.credential.kind = AutomationSecretKind::InlineDigest;
+        let profile_digest =
+            codex_orchestra_core::canonical_sha256(&serde_json::to_value(&profile).unwrap())
+                .unwrap();
+        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id: "automation-root-task",
+            source_revision: "revision-1",
+            profile: &profile,
+            profile_digest: &profile_digest,
+        })
+        .unwrap();
+        let issue = normalize_linear_issue(&json!({"data": {"issue": {
+            "id": "linear-42",
+            "identifier": "ORC-42",
+            "title": "Retain the failed dispatch",
+            "priority": 1,
+            "state": {"name": "Todo"},
+            "labels": {"nodes": []},
+            "relations": {"nodes": []},
+            "inverseRelations": {"nodes": []},
+            "createdAt": "2026-07-18T00:00:00.000Z",
+            "updatedAt": "2026-07-18T00:00:00.000Z"
+        }}}))
+        .unwrap();
+        let plan = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                output_cursor: None,
+                issues: std::slice::from_ref(&issue),
+            },
+            1,
+            50_000,
+        )
+        .unwrap();
+        let intent = store
+            .commit_coordination_plan(&mut root, &profile, plan)
+            .unwrap()
+            .dispatch_intent
+            .unwrap();
+        (repository, store, root, intent, profile)
+    }
+
+    #[test]
+    fn background_dispatch_failure_is_durable_until_a_completed_intent() {
+        let (repository, store, root, intent, _profile) = background_dispatch_fixture();
+
+        record_automation_dispatch_failure(
+            repository.path(),
+            &root.run_id,
+            &intent.intent_id,
+            &intent.claim_id,
+            "Linear refresh failed before dispatch",
+        )
+        .unwrap();
+
+        let mut durable = store.load().unwrap();
+        assert_eq!(
+            durable.coordination.error.as_deref(),
+            Some("Linear refresh failed before dispatch")
+        );
+        assert_eq!(durable.coordination.dispatch_intent.as_ref(), Some(&intent));
+        assert!(durable.claims.contains_key(&intent.claim_id));
+
+        store
+            .start_dispatch_intent(&mut durable, &intent.intent_id, true, 50_100)
+            .unwrap();
+        store
+            .complete_dispatch_intent(&mut durable, &intent.intent_id)
+            .unwrap();
+        let completed = durable.clone();
+        record_automation_dispatch_failure(
+            repository.path(),
+            &root.run_id,
+            &intent.intent_id,
+            &intent.claim_id,
+            "late observer error after completion",
+        )
+        .unwrap();
+        assert_eq!(store.load().unwrap(), completed);
+    }
+
+    #[tokio::test]
+    async fn production_dispatch_boundary_records_a_skipped_linear_refresh() {
+        let (repository, store, root, intent, _profile) = background_dispatch_fixture();
+        let service = OrchestraService::new(Weak::new());
+
+        let error = service
+            .execute_automation_dispatch_with_recovery(
+                "automation-root-task",
+                "WORKFLOW.md",
+                repository.path(),
+                &root.run_id,
+                intent.clone(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "re-resolve the referenced Linear credential, then retry"
+        );
+        let durable = store.load().unwrap();
+        assert_eq!(durable.coordination.error.as_deref(), Some(error.as_str()));
+        assert_eq!(durable.coordination.dispatch_intent.as_ref(), Some(&intent));
+        assert_eq!(durable.claims[&intent.claim_id].claim_id, intent.claim_id);
     }
 
     #[test]

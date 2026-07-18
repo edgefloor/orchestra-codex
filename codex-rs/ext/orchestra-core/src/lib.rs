@@ -66,6 +66,7 @@ pub use automation_run::AutomationHookStatus;
 pub use automation_run::AutomationIssueClaim;
 pub use automation_run::AutomationProfileRevision;
 pub use automation_run::AutomationProfileRevisionStatus;
+pub use automation_run::AutomationQueueBlocker;
 pub use automation_run::AutomationQueueCategory;
 pub use automation_run::AutomationQueueCounts;
 pub use automation_run::AutomationQueueItem;

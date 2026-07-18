@@ -1,29 +1,35 @@
-use crate::AgentHandle;
-use crate::AutomationEffect;
-use crate::AutomationIssue;
-use crate::AutomationProfile;
-use crate::RunStatus;
-use serde::Deserialize;
-use serde::Serialize;
-use sha2::Digest;
-use sha2::Sha256;
+use crate::{AgentHandle, AutomationEffect, AutomationIssue, AutomationProfile, RunStatus};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::fs::{self};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Component;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 static AUTOMATION_STATE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 const MAX_AUTOMATION_COORDINATION_PAGE_ISSUES: usize = 50;
+const MAX_AUTOMATION_QUEUE_BLOCKERS: usize = 8;
+const MAX_AUTOMATION_COORDINATION_ERROR_BYTES: usize = 512;
+const MAX_AUTOMATION_COORDINATION_NEXT_ACTION_BYTES: usize = 240;
+
+fn dispatch_failure_next_action(intent_id: &str, claim_id: &str) -> String {
+    bounded_preview(
+        &format!("retry background dispatch intent `{intent_id}` for retained claim `{claim_id}`"),
+        MAX_AUTOMATION_COORDINATION_NEXT_ACTION_BYTES,
+    )
+}
+
+fn clear_matching_dispatch_failure(checkpoint: &mut AutomationRootCheckpoint, intent_id: &str) {
+    if checkpoint.coordination.dispatch_error_intent_id.as_deref() == Some(intent_id) {
+        checkpoint.coordination.error = None;
+        checkpoint.coordination.dispatch_error_intent_id = None;
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -143,6 +149,16 @@ pub struct AutomationQueueItem {
     pub priority: Option<i64>,
     pub status: AutomationQueueStatus,
     pub reason: String,
+    #[serde(default)]
+    pub blocked_by: Vec<AutomationQueueBlocker>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationQueueBlocker {
+    pub id: Option<String>,
+    pub identifier: Option<String>,
+    pub state: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -156,6 +172,8 @@ pub struct AutomationQueueProjectionItem {
     pub claim_id: Option<String>,
     pub category: AutomationQueueCategory,
     pub next_action: String,
+    #[serde(default)]
+    pub blocked_by: Vec<AutomationQueueBlocker>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -237,6 +255,8 @@ pub struct AutomationCoordinationCheckpoint {
     pub started_at_ms: Option<u64>,
     pub completed_at_ms: Option<u64>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_error_intent_id: Option<String>,
     pub next_action: String,
     pub dispatch_intent: Option<AutomationDispatchIntent>,
 }
@@ -560,6 +580,14 @@ pub enum AutomationRunError {
         actual: AutomationDispatchIntentStatus,
     },
     #[error(
+        "Automation dispatch intent `{intent_id}` belongs to claim `{actual_claim_id}`, not `{expected_claim_id}`"
+    )]
+    DispatchIntentClaimMismatch {
+        intent_id: String,
+        expected_claim_id: String,
+        actual_claim_id: String,
+    },
+    #[error(
         "Automation coordination cursor is stale (expected scan revision {expected_scan_revision}, found {actual_scan_revision})"
     )]
     CoordinationCursorMismatch {
@@ -693,7 +721,7 @@ impl AutomationRunStore {
             store.write_active_profile_snapshot(request.profile_digest, request.profile)
         {
             let _ = fs::remove_file(&store.lease_path);
-            return Err(error);
+            return Err(error.into());
         }
         let mut checkpoint = AutomationRootCheckpoint {
             schema_version: 1,
@@ -1036,12 +1064,15 @@ impl AutomationRunStore {
                     | AutomationClaimStatus::Failed
             )
         {
-            let intent = next.coordination.dispatch_intent.as_mut().unwrap();
-            intent.status = AutomationDispatchIntentStatus::Completed;
+            let result = {
+                let intent = next.coordination.dispatch_intent.as_mut().unwrap();
+                intent.status = AutomationDispatchIntentStatus::Completed;
+                intent.clone()
+            };
+            clear_matching_dispatch_failure(&mut next, intent_id);
             next.coordination.next_action =
                 "dispatch outcome was already durable; scan the next bounded tracker page".into();
             next.next_action.clone_from(&next.coordination.next_action);
-            let result = intent.clone();
             self.persist(&mut next, expected_epoch, expected_revision)?;
             *checkpoint = next;
             return Ok(result);
@@ -1055,6 +1086,7 @@ impl AutomationRunStore {
             claim.next_action = "tracker issue became terminal; stop future invocations".into();
             let intent = next.coordination.dispatch_intent.as_mut().unwrap();
             intent.status = AutomationDispatchIntentStatus::Completed;
+            clear_matching_dispatch_failure(&mut next, intent_id);
             next.coordination.next_action =
                 "dispatch cancelled after tracker freshness check; scan the next page".into();
         } else if intent_status == AutomationDispatchIntentStatus::Started {
@@ -1131,10 +1163,70 @@ impl AutomationRunStore {
             });
         }
         intent.status = AutomationDispatchIntentStatus::Completed;
+        let result = intent.clone();
+        clear_matching_dispatch_failure(&mut next, intent_id);
         next.coordination.next_action =
             "dispatch committed; scan the next bounded tracker page".into();
         next.next_action.clone_from(&next.coordination.next_action);
+        self.persist(&mut next, expected_epoch, expected_revision)?;
+        *checkpoint = next;
+        Ok(result)
+    }
+
+    pub fn record_dispatch_failure(
+        &self,
+        checkpoint: &mut AutomationRootCheckpoint,
+        intent_id: &str,
+        claim_id: &str,
+        error: &str,
+    ) -> Result<AutomationDispatchIntent, AutomationRunError> {
+        let expected_epoch = checkpoint.lease_epoch;
+        let expected_revision = checkpoint.revision;
+        self.ensure_fresh(expected_epoch, expected_revision)?;
+
+        let mut next = checkpoint.clone();
+        let intent = next
+            .coordination
+            .dispatch_intent
+            .as_ref()
+            .filter(|intent| intent.intent_id == intent_id)
+            .ok_or_else(|| AutomationRunError::MissingDispatchIntent(intent_id.into()))?;
+        if intent.status == AutomationDispatchIntentStatus::Completed {
+            return Err(AutomationRunError::InvalidDispatchIntentStatus {
+                intent_id: intent_id.into(),
+                actual: intent.status,
+            });
+        }
+        if intent.claim_id != claim_id {
+            return Err(AutomationRunError::DispatchIntentClaimMismatch {
+                intent_id: intent_id.into(),
+                expected_claim_id: claim_id.into(),
+                actual_claim_id: intent.claim_id.clone(),
+            });
+        }
+        next.claims
+            .get(claim_id)
+            .ok_or_else(|| AutomationRunError::MissingClaim(claim_id.into()))?;
+
+        let bounded_error = bounded_preview(error, MAX_AUTOMATION_COORDINATION_ERROR_BYTES);
+        let next_action = dispatch_failure_next_action(intent_id, claim_id);
         let result = intent.clone();
+        if next.coordination.error.as_deref() == Some(bounded_error.as_str())
+            && next.coordination.dispatch_error_intent_id.as_deref() == Some(intent_id)
+            && next.coordination.next_action == next_action
+            && next.next_action == next_action
+        {
+            let _guard = AUTOMATION_STATE_WRITE_LOCK
+                .lock()
+                .map_err(|_| std::io::Error::other("Automation state write lock is poisoned"))?;
+            self.ensure_fresh(expected_epoch, expected_revision)?;
+            return Ok(result);
+        }
+
+        next.coordination.error = Some(bounded_error);
+        next.coordination.dispatch_error_intent_id = Some(intent_id.into());
+        next.coordination.next_action = next_action.clone();
+        next.next_action = next_action;
         self.persist(&mut next, expected_epoch, expected_revision)?;
         *checkpoint = next;
         Ok(result)
@@ -1232,11 +1324,7 @@ impl AutomationRunStore {
             if has_nonterminal_blocker(profile, issue) {
                 checkpoint.queue.insert(
                     issue.id.clone(),
-                    queue_item(
-                        issue,
-                        AutomationQueueStatus::Blocked,
-                        "waiting for a nonterminal blocker",
-                    ),
+                    blocked_queue_item(profile, issue, "waiting for a nonterminal blocker"),
                 );
                 continue;
             }
@@ -1721,7 +1809,7 @@ impl AutomationRunStore {
                 claim.next_action = "inspect missing Issue task; do not create a duplicate".into();
                 continue;
             }
-            if !claim.worktree.exists() && claim.issue_task.is_some() {
+            if claim.worktree.exists() == false && claim.issue_task.is_some() {
                 blockers.push(format!("{} missing worktree", claim.issue_identifier));
                 claim.next_action = "inspect missing worktree; do not create a duplicate".into();
                 continue;
@@ -2622,6 +2710,7 @@ pub fn plan_coordination_page(
             coordination.started_at_ms = Some(now_ms);
             coordination.completed_at_ms = Some(now_ms);
             coordination.error = Some(bounded_preview(reason, 512));
+            coordination.dispatch_error_intent_id = None;
             let has_outstanding_intent = coordination
                 .dispatch_intent
                 .as_ref()
@@ -2797,11 +2886,7 @@ pub fn plan_coordination_page(
         if has_nonterminal_blocker(profile, issue) {
             queue.insert(
                 issue.id.clone(),
-                queue_item(
-                    issue,
-                    AutomationQueueStatus::Blocked,
-                    "waiting for a nonterminal blocker",
-                ),
+                blocked_queue_item(profile, issue, "waiting for a nonterminal blocker"),
             );
             continue;
         }
@@ -2914,6 +2999,7 @@ pub fn plan_coordination_page(
         started_at_ms: Some(now_ms),
         completed_at_ms: Some(now_ms),
         error: None,
+        dispatch_error_intent_id: None,
         next_action,
         dispatch_intent,
     };
@@ -3056,7 +3142,33 @@ fn queue_item(
         priority: issue.priority,
         status,
         reason: reason.into(),
+        blocked_by: Vec::new(),
     }
+}
+
+fn blocked_queue_item(
+    profile: &AutomationProfile,
+    issue: &AutomationIssue,
+    reason: &str,
+) -> AutomationQueueItem {
+    let mut item = queue_item(issue, AutomationQueueStatus::Blocked, reason);
+    item.blocked_by = issue
+        .blocked_by
+        .iter()
+        .filter(|blocker| {
+            blocker
+                .state
+                .as_deref()
+                .is_none_or(|state| !is_terminal_state(profile, state))
+        })
+        .take(MAX_AUTOMATION_QUEUE_BLOCKERS)
+        .map(|blocker| AutomationQueueBlocker {
+            id: blocker.id.clone(),
+            identifier: blocker.identifier.clone(),
+            state: blocker.state.clone(),
+        })
+        .collect();
+    item
 }
 
 pub fn automation_queue_counts(checkpoint: &AutomationRootCheckpoint) -> AutomationQueueCounts {
@@ -3114,6 +3226,7 @@ pub fn automation_queue_page(
                 claim_id: None,
                 category: item_category,
                 next_action: item.reason.clone(),
+                blocked_by: item.blocked_by.clone(),
             })
         })
         .chain(checkpoint.claims.values().filter_map(|claim| {
@@ -3145,6 +3258,7 @@ pub fn automation_queue_page(
                 claim_id: Some(claim.claim_id.clone()),
                 category: claim_category,
                 next_action: claim.next_action.clone(),
+                blocked_by: Vec::new(),
             })
         }))
         .collect::<Vec<_>>();
@@ -3248,18 +3362,12 @@ fn is_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AutomationAgentProfile;
-    use crate::AutomationCodexPolicy;
-    use crate::AutomationEffect;
-    use crate::AutomationHooksProfile;
-    use crate::AutomationOrchestraProfile;
-    use crate::AutomationPollingProfile;
-    use crate::AutomationSecretKind;
-    use crate::AutomationSecretReference;
-    use crate::AutomationTrackerProfile;
-    use crate::AutomationWorkspaceProfile;
-    use serde_json::Value;
-    use serde_json::json;
+    use crate::{
+        AutomationAgentProfile, AutomationCodexPolicy, AutomationEffect, AutomationHooksProfile,
+        AutomationOrchestraProfile, AutomationPollingProfile, AutomationSecretKind,
+        AutomationSecretReference, AutomationTrackerProfile, AutomationWorkspaceProfile,
+    };
+    use serde_json::{Value, json};
     use tempfile::tempdir;
 
     fn profile(workspace: &Path) -> AutomationProfile {
@@ -3351,6 +3459,49 @@ mod tests {
             created_at: Some(format!("2026-07-{:02}T00:00:00Z", priority.unwrap_or(9))),
             updated_at: Some("2026-07-16T00:00:00Z".into()),
         }
+    }
+
+    fn pending_dispatch_fixture(
+        owner_thread_id: &str,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        AutomationRunStore,
+        AutomationRootCheckpoint,
+        AutomationDispatchIntent,
+    ) {
+        let repository = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let profile = profile(workspace.path());
+        let digest = crate::canonical_sha256(&serde_json::to_value(&profile).unwrap()).unwrap();
+        let (store, mut root) = AutomationRunStore::start(AutomationRunStart {
+            repository: repository.path(),
+            owner_thread_id,
+            source_revision: "abc123",
+            profile: &profile,
+            profile_digest: &digest,
+        })
+        .unwrap();
+        let tracked_issue = issue();
+        let plan = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Ready {
+                expected_scan_revision: 0,
+                input_cursor: None,
+                output_cursor: None,
+                issues: std::slice::from_ref(&tracked_issue),
+            },
+            1,
+            50_000,
+        )
+        .unwrap();
+        let intent = store
+            .commit_coordination_plan(&mut root, &profile, plan)
+            .unwrap()
+            .dispatch_intent
+            .unwrap();
+        (repository, workspace, store, root, intent)
     }
 
     #[test]
@@ -3662,8 +3813,24 @@ mod tests {
         blocked.blocked_by.push(crate::AutomationIssueBlocker {
             id: Some("blocker-1".into()),
             identifier: Some("ORC-99".into()),
-            state: Some("Todo".into()),
+            state: Some("Done".into()),
         });
+        for index in 2..=18 {
+            blocked.blocked_by.push(crate::AutomationIssueBlocker {
+                id: Some(format!("blocker-{index}")),
+                identifier: Some(format!("ORC-{}", 98 + index)),
+                state: Some(
+                    if index <= 8 {
+                        "Done"
+                    } else if index % 2 == 0 {
+                        "In Progress"
+                    } else {
+                        "Todo"
+                    }
+                    .into(),
+                ),
+            });
+        }
         let terminal = queued_issue("issue-5", "ORC-5", "Done", Some(1));
         let mut wrong_label = queued_issue("issue-6", "ORC-6", "Todo", Some(1));
         wrong_label.labels = vec!["not-automation".into()];
@@ -3701,6 +3868,39 @@ mod tests {
             }
         );
         assert!(!checkpoint.queue.contains_key("issue-6"));
+        let blocked_checkpoint = &checkpoint.queue["issue-4"];
+        assert_eq!(
+            blocked_checkpoint.blocked_by.len(),
+            MAX_AUTOMATION_QUEUE_BLOCKERS
+        );
+        assert_eq!(
+            blocked_checkpoint.blocked_by[0].identifier.as_deref(),
+            Some("ORC-107")
+        );
+        assert_eq!(
+            blocked_checkpoint.blocked_by[7].identifier.as_deref(),
+            Some("ORC-114")
+        );
+        assert!(blocked_checkpoint.blocked_by.iter().all(|blocker| {
+            blocker
+                .state
+                .as_deref()
+                .is_none_or(|state| !is_terminal_state(&profile, state))
+        }));
+        let blocked_projection = store
+            .queue_page(&checkpoint, AutomationQueueCategory::Blocked, 0, 50)
+            .items
+            .pop()
+            .unwrap();
+        assert_eq!(blocked_projection.blocked_by, blocked_checkpoint.blocked_by);
+
+        let mut legacy_queue_json = serde_json::to_value(blocked_checkpoint).unwrap();
+        legacy_queue_json
+            .as_object_mut()
+            .unwrap()
+            .remove("blockedBy");
+        let legacy_queue: AutomationQueueItem = serde_json::from_value(legacy_queue_json).unwrap();
+        assert!(legacy_queue.blocked_by.is_empty());
         assert_eq!(
             store
                 .queue_page(&checkpoint, AutomationQueueCategory::Queued, 0, 1)
@@ -4008,6 +4208,248 @@ mod tests {
     }
 
     #[test]
+    fn pending_dispatch_failure_is_bounded_durable_and_exactly_replay_safe() {
+        let (_repository, _workspace, store, mut root, intent) =
+            pending_dispatch_fixture("task-dispatch-failure");
+        let claim_before = root.claims[&intent.claim_id].clone();
+        let error = format!("provider refused background dispatch: {}", "é".repeat(400));
+
+        let recorded = store
+            .record_dispatch_failure(&mut root, &intent.intent_id, &intent.claim_id, &error)
+            .unwrap();
+
+        assert_eq!(recorded, intent);
+        assert_eq!(root.coordination.dispatch_intent.as_ref(), Some(&intent));
+        assert_eq!(root.claims[&intent.claim_id], claim_before);
+        let bounded_error = root.coordination.error.as_deref().unwrap();
+        assert!(bounded_error.len() <= MAX_AUTOMATION_COORDINATION_ERROR_BYTES);
+        assert!(bounded_error.ends_with('…'));
+        assert!(
+            root.coordination.next_action.len() <= MAX_AUTOMATION_COORDINATION_NEXT_ACTION_BYTES
+        );
+        assert!(root.coordination.next_action.contains(&intent.intent_id));
+        assert!(root.coordination.next_action.contains(&intent.claim_id));
+        assert_eq!(root.next_action, root.coordination.next_action);
+        assert_eq!(store.load().unwrap(), root);
+
+        let recorded_revision = root.revision;
+        let durable_before_replay = store.load().unwrap();
+        assert_eq!(
+            store
+                .record_dispatch_failure(&mut root, &intent.intent_id, &intent.claim_id, &error)
+                .unwrap(),
+            intent
+        );
+        assert_eq!(root.revision, recorded_revision);
+        assert_eq!(store.load().unwrap(), durable_before_replay);
+    }
+
+    #[test]
+    fn started_dispatch_failure_preserves_the_started_intent_and_claim() {
+        let (_repository, _workspace, store, mut root, intent) =
+            pending_dispatch_fixture("task-started-dispatch-failure");
+        let started = store
+            .start_dispatch_intent(&mut root, &intent.intent_id, true, 50_100)
+            .unwrap();
+        let claim_before = root.claims[&intent.claim_id].clone();
+
+        let recorded = store
+            .record_dispatch_failure(
+                &mut root,
+                &intent.intent_id,
+                &intent.claim_id,
+                "retained task dispatch failed after start",
+            )
+            .unwrap();
+
+        assert_eq!(recorded, started);
+        assert_eq!(recorded.status, AutomationDispatchIntentStatus::Started);
+        assert_eq!(root.claims[&intent.claim_id], claim_before);
+        assert_eq!(store.load().unwrap(), root);
+
+        let completed = store
+            .complete_dispatch_intent(&mut root, &intent.intent_id)
+            .unwrap();
+        assert_eq!(completed.status, AutomationDispatchIntentStatus::Completed);
+        assert_eq!(root.coordination.error, None);
+        assert_eq!(store.load().unwrap(), root);
+    }
+
+    #[test]
+    fn dispatch_completion_preserves_a_newer_skipped_intake_error() {
+        let (_repository, workspace, store, mut root, intent) =
+            pending_dispatch_fixture("task-newer-intake-error");
+        let profile = profile(workspace.path());
+        store
+            .record_dispatch_failure(
+                &mut root,
+                &intent.intent_id,
+                &intent.claim_id,
+                "background dispatch failed first",
+            )
+            .unwrap();
+        assert_eq!(
+            root.coordination.dispatch_error_intent_id.as_deref(),
+            Some(intent.intent_id.as_str())
+        );
+
+        let skipped = plan_coordination_page(
+            &root,
+            &profile,
+            AutomationCoordinationPage::Skipped {
+                expected_scan_revision: root.coordination.scan_revision,
+                input_cursor: root.coordination.output_cursor.as_deref(),
+                reason: "newer tracker intake failure",
+            },
+            1,
+            50_200,
+        )
+        .unwrap();
+        store
+            .commit_coordination_plan(&mut root, &profile, skipped)
+            .unwrap();
+        assert_eq!(
+            root.coordination.error.as_deref(),
+            Some("newer tracker intake failure")
+        );
+        assert_eq!(root.coordination.dispatch_error_intent_id, None);
+
+        store
+            .start_dispatch_intent(&mut root, &intent.intent_id, true, 50_300)
+            .unwrap();
+        store
+            .complete_dispatch_intent(&mut root, &intent.intent_id)
+            .unwrap();
+        assert_eq!(
+            root.coordination.error.as_deref(),
+            Some("newer tracker intake failure")
+        );
+        assert_eq!(store.load().unwrap(), root);
+    }
+
+    #[test]
+    fn dispatch_failure_bounds_retry_guidance_for_retained_long_identities() {
+        let (_repository, _workspace, store, mut root, intent) =
+            pending_dispatch_fixture("task-bounded-dispatch-guidance");
+        let long_claim_id = format!("claim-{}", "é".repeat(180));
+        let long_intent_id = format!("intent-{}", "é".repeat(180));
+        let mut claim = root.claims.remove(&intent.claim_id).unwrap();
+        claim.claim_id.clone_from(&long_claim_id);
+        root.claims.insert(long_claim_id.clone(), claim);
+        let retained_intent = root.coordination.dispatch_intent.as_mut().unwrap();
+        retained_intent.claim_id.clone_from(&long_claim_id);
+        retained_intent.intent_id.clone_from(&long_intent_id);
+        store.save(&mut root).unwrap();
+
+        let recorded = store
+            .record_dispatch_failure(
+                &mut root,
+                &long_intent_id,
+                &long_claim_id,
+                "background dispatch failed",
+            )
+            .unwrap();
+
+        assert_eq!(recorded.intent_id, long_intent_id);
+        assert_eq!(recorded.claim_id, long_claim_id);
+        assert_eq!(recorded.status, AutomationDispatchIntentStatus::Pending);
+        assert!(
+            root.coordination.next_action.len() <= MAX_AUTOMATION_COORDINATION_NEXT_ACTION_BYTES
+        );
+        assert!(root.coordination.next_action.ends_with('…'));
+        assert_eq!(store.load().unwrap(), root);
+    }
+
+    #[test]
+    fn dispatch_failure_rejects_wrong_or_completed_intent_without_mutation() {
+        let (_repository, _workspace, store, mut root, intent) =
+            pending_dispatch_fixture("task-rejected-dispatch-failure");
+        let before = root.clone();
+
+        assert!(matches!(
+            store.record_dispatch_failure(
+                &mut root,
+                &intent.intent_id,
+                "claim-does-not-match",
+                "failure",
+            ),
+            Err(AutomationRunError::DispatchIntentClaimMismatch { .. })
+        ));
+        assert_eq!(root, before);
+        assert_eq!(store.load().unwrap(), before);
+        assert!(matches!(
+            store.record_dispatch_failure(
+                &mut root,
+                "intent-does-not-match",
+                &intent.claim_id,
+                "failure",
+            ),
+            Err(AutomationRunError::MissingDispatchIntent(_))
+        ));
+        assert_eq!(root, before);
+
+        store
+            .start_dispatch_intent(&mut root, &intent.intent_id, true, 50_100)
+            .unwrap();
+        store
+            .complete_dispatch_intent(&mut root, &intent.intent_id)
+            .unwrap();
+        let completed = root.clone();
+        assert!(matches!(
+            store.record_dispatch_failure(
+                &mut root,
+                &intent.intent_id,
+                &intent.claim_id,
+                "too late",
+            ),
+            Err(AutomationRunError::InvalidDispatchIntentStatus {
+                actual: AutomationDispatchIntentStatus::Completed,
+                ..
+            })
+        ));
+        assert_eq!(root, completed);
+        assert_eq!(store.load().unwrap(), completed);
+    }
+
+    #[test]
+    fn dispatch_failure_is_fenced_by_checkpoint_revision_and_lease_epoch() {
+        let (_repository, _workspace, store, mut stale_revision, intent) =
+            pending_dispatch_fixture("task-stale-dispatch-failure");
+        let stale_before = stale_revision.clone();
+        let mut concurrent = stale_revision.clone();
+        concurrent.next_action = "concurrent durable transition".into();
+        store.save(&mut concurrent).unwrap();
+
+        assert!(matches!(
+            store.record_dispatch_failure(
+                &mut stale_revision,
+                &intent.intent_id,
+                &intent.claim_id,
+                "stale revision",
+            ),
+            Err(AutomationRunError::StaleLease { .. })
+        ));
+        assert_eq!(stale_revision, stale_before);
+        assert_eq!(store.load().unwrap(), concurrent);
+
+        let durable = concurrent.clone();
+        let mut stale_epoch = concurrent;
+        stale_epoch.lease_epoch = stale_epoch.lease_epoch.saturating_add(1);
+        let stale_epoch_before = stale_epoch.clone();
+        assert!(matches!(
+            store.record_dispatch_failure(
+                &mut stale_epoch,
+                &intent.intent_id,
+                &intent.claim_id,
+                "stale lease epoch",
+            ),
+            Err(AutomationRunError::StaleLease { .. })
+        ));
+        assert_eq!(stale_epoch, stale_epoch_before);
+        assert_eq!(store.load().unwrap(), durable);
+    }
+
+    #[test]
     fn coordination_due_retry_wins_before_new_issue() {
         let repository = tempdir().unwrap();
         let workspace = tempdir().unwrap();
@@ -4151,6 +4593,14 @@ mod tests {
                 .status,
             AutomationDispatchIntentStatus::Started
         );
+        store
+            .record_dispatch_failure(
+                &mut root,
+                &intent.intent_id,
+                &intent.claim_id,
+                "fresh tracker read failed once",
+            )
+            .unwrap();
 
         let cancelled = store
             .start_dispatch_intent(&mut root, &intent.intent_id, false, 50_200)
@@ -4160,6 +4610,7 @@ mod tests {
             root.claims[&intent.claim_id].status,
             AutomationClaimStatus::Cancelled
         );
+        assert_eq!(root.coordination.error, None);
         assert_eq!(store.load().unwrap(), root);
     }
 
@@ -4200,6 +4651,14 @@ mod tests {
             .start_dispatch_intent(&mut root, &intent.intent_id, true, 50_100)
             .unwrap();
         store
+            .record_dispatch_failure(
+                &mut root,
+                &intent.intent_id,
+                &intent.claim_id,
+                "terminal claim completion raced the observer",
+            )
+            .unwrap();
+        store
             .update_claim(&mut root, &intent.claim_id, |claim| {
                 claim.status = AutomationClaimStatus::Completed;
             })
@@ -4213,6 +4672,7 @@ mod tests {
             root.claims[&intent.claim_id].status,
             AutomationClaimStatus::Completed
         );
+        assert_eq!(root.coordination.error, None);
         assert_eq!(store.load().unwrap(), root);
     }
 

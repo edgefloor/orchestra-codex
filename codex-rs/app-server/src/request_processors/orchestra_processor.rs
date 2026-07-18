@@ -644,6 +644,20 @@ fn project_automation_run(
                 turns_in_window: claim.turns_in_window,
                 continuation_count: claim.continuation_count,
                 retry_attempt: claim.retry_attempt,
+                scheduled_retry: claim.retry.map(|retry| {
+                    protocol::AutomationRetryScheduleProjection {
+                        kind: match retry.kind {
+                            core::AutomationRetryKind::Retry => {
+                                protocol::AutomationRetryKind::Retry
+                            }
+                            core::AutomationRetryKind::Continuation => {
+                                protocol::AutomationRetryKind::Continuation
+                            }
+                        },
+                        ready_at_ms: retry.ready_at_ms,
+                        reset_turn_window: retry.reset_turn_window,
+                    }
+                }),
                 last_progress_at_ms: claim.last_progress_at_ms,
                 profile_digest: claim.profile_digest,
                 profile_revision: claim.profile_revision,
@@ -865,6 +879,15 @@ fn project_automation_queue_item(
         claim_id: item.claim_id,
         category: protocol_queue_category(item.category),
         next_action: automation_bounded_text(item.next_action),
+        blocked_by: item
+            .blocked_by
+            .into_iter()
+            .map(|blocker| protocol::AutomationQueueBlockerProjection {
+                id: blocker.id.map(automation_bounded_text),
+                identifier: blocker.identifier.map(automation_bounded_text),
+                state: blocker.state.map(automation_bounded_text),
+            })
+            .collect(),
     }
 }
 
@@ -1477,6 +1500,52 @@ mod automation_acceptance_tests {
     use tempfile::tempdir;
 
     const RAW_CHILD_DETAIL: &str = "RAW_CHILD_DETAIL_MUST_STAY_IN_THE_NATIVE_WORKFLOW_RUN";
+
+    #[test]
+    fn queue_blockers_preserve_order_and_bound_each_projected_identity() {
+        let oversized = "é".repeat(MAX_PROJECTION_TEXT_BYTES);
+        let projected = project_automation_queue_item(core::AutomationQueueProjectionItem {
+            issue_id: "issue-1".into(),
+            issue_identifier: "ORC-1".into(),
+            issue_title: "Blocked issue".into(),
+            state: "Todo".into(),
+            priority: None,
+            claim_id: None,
+            category: core::AutomationQueueCategory::Blocked,
+            next_action: "inspect blockers".into(),
+            blocked_by: vec![
+                core::AutomationQueueBlocker {
+                    id: Some(oversized),
+                    identifier: Some("ORC-2".into()),
+                    state: Some("In Progress".into()),
+                },
+                core::AutomationQueueBlocker {
+                    id: Some("blocker-2".into()),
+                    identifier: Some("ORC-3".into()),
+                    state: None,
+                },
+            ],
+        });
+
+        assert_eq!(projected.blocked_by.len(), 2);
+        let first_id = projected.blocked_by[0].id.as_ref().unwrap();
+        assert!(first_id.truncated);
+        assert!(first_id.text.len() <= MAX_PROJECTION_TEXT_BYTES + '…'.len_utf8());
+        assert_eq!(
+            projected.blocked_by[0]
+                .identifier
+                .as_ref()
+                .map(|text| text.text.as_str()),
+            Some("ORC-2")
+        );
+        assert_eq!(
+            projected.blocked_by[1]
+                .identifier
+                .as_ref()
+                .map(|text| text.text.as_str()),
+            Some("ORC-3")
+        );
+    }
 
     struct AcceptanceHost;
 

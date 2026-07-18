@@ -8293,6 +8293,16 @@
             "minimum": 0.0,
             "type": "integer"
           },
+          "scheduledRetry": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AutomationRetryScheduleProjection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "sourceRevision": {
             "type": "string"
           },
@@ -8532,6 +8542,41 @@
         ],
         "type": "string"
       },
+      "AutomationQueueBlockerProjection": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/OrchestraBoundedText"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "identifier": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/OrchestraBoundedText"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/OrchestraBoundedText"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "AutomationQueueCategory": {
         "enum": [
           "queued",
@@ -8588,6 +8633,12 @@
       },
       "AutomationQueueItemProjection": {
         "properties": {
+          "blockedBy": {
+            "items": {
+              "$ref": "#/definitions/v2/AutomationQueueBlockerProjection"
+            },
+            "type": "array"
+          },
           "category": {
             "$ref": "#/definitions/v2/AutomationQueueCategory"
           },
@@ -8732,6 +8783,34 @@
           "blocked"
         ],
         "type": "string"
+      },
+      "AutomationRetryKind": {
+        "enum": [
+          "retry",
+          "continuation"
+        ],
+        "type": "string"
+      },
+      "AutomationRetryScheduleProjection": {
+        "properties": {
+          "kind": {
+            "$ref": "#/definitions/v2/AutomationRetryKind"
+          },
+          "readyAtMs": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "resetTurnWindow": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "readyAtMs",
+          "resetTurnWindow"
+        ],
+        "type": "object"
       },
       "AutomationRootStatus": {
         "enum": [

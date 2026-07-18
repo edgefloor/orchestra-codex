@@ -291,6 +291,23 @@ pub struct AutomationQueueItemProjection {
     pub claim_id: Option<String>,
     pub category: AutomationQueueCategory,
     pub next_action: OrchestraBoundedText,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<AutomationQueueBlockerProjection>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationQueueBlockerProjection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<OrchestraBoundedText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub identifier: Option<OrchestraBoundedText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub state: Option<OrchestraBoundedText>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -417,6 +434,9 @@ pub struct AutomationIssueClaimProjection {
     pub turns_in_window: u32,
     pub continuation_count: u32,
     pub retry_attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub scheduled_retry: Option<AutomationRetryScheduleProjection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub last_progress_at_ms: Option<u64>,
@@ -441,6 +461,23 @@ pub struct AutomationIssueClaimProjection {
     pub hook_receipts: Vec<AutomationHookReceiptProjection>,
     pub cleanup: AutomationCleanupProjection,
     pub next_action: OrchestraBoundedText,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AutomationRetryScheduleProjection {
+    pub kind: AutomationRetryKind,
+    pub ready_at_ms: u64,
+    pub reset_turn_window: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum AutomationRetryKind {
+    Retry,
+    Continuation,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -915,7 +952,7 @@ mod automation_protocol_tests {
 
     #[test]
     fn automation_claim_exposes_only_the_latest_durable_steering_receipt() {
-        let claim = |latest_steering_receipt| AutomationIssueClaimProjection {
+        let claim = |latest_steering_receipt, scheduled_retry| AutomationIssueClaimProjection {
             claim_id: "claim-1".into(),
             issue_id: "issue-1".into(),
             issue_identifier: "ORC-32".into(),
@@ -930,6 +967,7 @@ mod automation_protocol_tests {
             turns_in_window: 1,
             continuation_count: 0,
             retry_attempt: 0,
+            scheduled_retry,
             last_progress_at_ms: Some(42),
             profile_digest: "profile-sha".into(),
             profile_revision: 1,
@@ -953,21 +991,31 @@ mod automation_protocol_tests {
             },
         };
 
-        let absent = serde_json::to_value(claim(None)).unwrap();
+        let absent = serde_json::to_value(claim(None, None)).unwrap();
         assert!(absent.get("latestSteeringReceipt").is_none());
+        assert!(absent.get("scheduledRetry").is_none());
+        let legacy: AutomationIssueClaimProjection = serde_json::from_value(absent).unwrap();
+        assert!(legacy.scheduled_retry.is_none());
 
-        let present = serde_json::to_value(claim(Some(AutomationSteeringReceipt {
-            sequence: 2,
-            submitted_at_ms: 42,
-            initiator_thread_id: "task-1".into(),
-            target_thread_id: "issue-task-1".into(),
-            authority: "automation-claim-native-send-input-v1".into(),
-            input_sha256: "input-sha".into(),
-            input_preview: "Focus on recovery.".into(),
-            status: AutomationSteeringStatus::Delivered,
-            provider_receipt: Some("submission-2".into()),
-            failure: None,
-        })))
+        let present = serde_json::to_value(claim(
+            Some(AutomationSteeringReceipt {
+                sequence: 2,
+                submitted_at_ms: 42,
+                initiator_thread_id: "task-1".into(),
+                target_thread_id: "issue-task-1".into(),
+                authority: "automation-claim-native-send-input-v1".into(),
+                input_sha256: "input-sha".into(),
+                input_preview: "Focus on recovery.".into(),
+                status: AutomationSteeringStatus::Delivered,
+                provider_receipt: Some("submission-2".into()),
+                failure: None,
+            }),
+            Some(AutomationRetryScheduleProjection {
+                kind: AutomationRetryKind::Continuation,
+                ready_at_ms: 84,
+                reset_turn_window: true,
+            }),
+        ))
         .unwrap();
         assert_eq!(present["latestSteeringReceipt"]["sequence"], 2);
         assert_eq!(present["latestSteeringReceipt"]["status"], "delivered");
@@ -975,6 +1023,58 @@ mod automation_protocol_tests {
             present["latestSteeringReceipt"]["providerReceipt"],
             "submission-2"
         );
+        assert_eq!(present["scheduledRetry"]["kind"], "continuation");
+        assert_eq!(present["scheduledRetry"]["readyAtMs"], 84);
+        assert_eq!(present["scheduledRetry"]["resetTurnWindow"], true);
+    }
+
+    #[test]
+    fn automation_queue_blockers_default_for_legacy_payloads() {
+        let legacy = serde_json::json!({
+            "issueId": "issue-1",
+            "issueIdentifier": "ORC-1",
+            "issueTitle": { "text": "Blocked issue", "truncated": false },
+            "state": "Todo",
+            "category": "blocked",
+            "nextAction": { "text": "inspect blockers", "truncated": false }
+        });
+
+        let item: AutomationQueueItemProjection = serde_json::from_value(legacy).unwrap();
+        assert!(item.blocked_by.is_empty());
+
+        let projected = AutomationQueueItemProjection {
+            blocked_by: vec![
+                AutomationQueueBlockerProjection {
+                    id: Some(OrchestraBoundedText {
+                        text: "blocker-1".into(),
+                        truncated: false,
+                    }),
+                    identifier: Some(OrchestraBoundedText {
+                        text: "ORC-2".into(),
+                        truncated: false,
+                    }),
+                    state: Some(OrchestraBoundedText {
+                        text: "In Progress".into(),
+                        truncated: false,
+                    }),
+                },
+                AutomationQueueBlockerProjection {
+                    id: Some(OrchestraBoundedText {
+                        text: "blocker-2".into(),
+                        truncated: false,
+                    }),
+                    identifier: Some(OrchestraBoundedText {
+                        text: "ORC-3".into(),
+                        truncated: false,
+                    }),
+                    state: None,
+                },
+            ],
+            ..item
+        };
+        let value = serde_json::to_value(projected).unwrap();
+        assert_eq!(value["blockedBy"][0]["identifier"]["text"], "ORC-2");
+        assert_eq!(value["blockedBy"][1]["identifier"]["text"], "ORC-3");
     }
 
     #[test]

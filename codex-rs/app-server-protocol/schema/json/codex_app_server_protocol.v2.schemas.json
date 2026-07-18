@@ -1843,6 +1843,16 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "scheduledRetry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AutomationRetryScheduleProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "sourceRevision": {
           "type": "string"
         },
@@ -2082,6 +2092,41 @@
       ],
       "type": "string"
     },
+    "AutomationQueueBlockerProjection": {
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraBoundedText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identifier": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraBoundedText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OrchestraBoundedText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
     "AutomationQueueCategory": {
       "enum": [
         "queued",
@@ -2138,6 +2183,12 @@
     },
     "AutomationQueueItemProjection": {
       "properties": {
+        "blockedBy": {
+          "items": {
+            "$ref": "#/definitions/AutomationQueueBlockerProjection"
+          },
+          "type": "array"
+        },
         "category": {
           "$ref": "#/definitions/AutomationQueueCategory"
         },
@@ -2282,6 +2333,34 @@
         "blocked"
       ],
       "type": "string"
+    },
+    "AutomationRetryKind": {
+      "enum": [
+        "retry",
+        "continuation"
+      ],
+      "type": "string"
+    },
+    "AutomationRetryScheduleProjection": {
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/AutomationRetryKind"
+        },
+        "readyAtMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "resetTurnWindow": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "readyAtMs",
+        "resetTurnWindow"
+      ],
+      "type": "object"
     },
     "AutomationRootStatus": {
       "enum": [
