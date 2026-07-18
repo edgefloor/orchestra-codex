@@ -513,8 +513,7 @@ fn project_automation_run(
     let projected_claims = claims
         .into_values()
         .take(visible_claim_limit)
-        .chain(focused_claim)
-        .collect::<Vec<_>>();
+        .chain(focused_claim);
     let categories = [
         core::AutomationQueueCategory::Queued,
         core::AutomationQueueCategory::Running,
