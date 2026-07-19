@@ -435,6 +435,7 @@ pub struct AutomationIssueClaimProjection {
     pub issue_id: String,
     pub issue_identifier: String,
     pub issue_title: OrchestraBoundedText,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub issue_url: Option<String>,
     pub tracker_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -472,6 +473,12 @@ pub struct AutomationIssueClaimProjection {
     pub hook_receipts: Vec<AutomationHookReceiptProjection>,
     pub cleanup: AutomationCleanupProjection,
     pub next_action: OrchestraBoundedText,
+}
+
+fn nullable_string_schema(
+    generator: &mut schemars::r#gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    generator.subschema_for::<Option<String>>()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -983,6 +990,21 @@ mod automation_protocol_tests {
         })
         .unwrap();
         assert!(input.get("default").is_none());
+    }
+
+    #[test]
+    fn automation_claim_schema_requires_nullable_issue_url() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(AutomationIssueClaimProjection)).unwrap();
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&serde_json::json!("issueUrl")))
+        );
+        assert_eq!(
+            schema["properties"]["issueUrl"]["type"],
+            serde_json::json!(["string", "null"])
+        );
     }
 
     #[test]

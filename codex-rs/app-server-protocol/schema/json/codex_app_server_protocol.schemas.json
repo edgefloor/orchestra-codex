@@ -8358,6 +8358,7 @@
           "issueId",
           "issueIdentifier",
           "issueTitle",
+          "issueUrl",
           "nextAction",
           "profileDigest",
           "profileRevision",
