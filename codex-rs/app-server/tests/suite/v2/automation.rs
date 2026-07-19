@@ -21,6 +21,7 @@ use codex_orchestra_core::AutomationRunStart;
 use codex_orchestra_core::AutomationRunStore;
 use codex_orchestra_core::plan_coordination_page;
 use core_test_support::skip_if_remote;
+use pretty_assertions::assert_eq;
 use std::fs;
 use std::process::Command;
 use std::time::Duration;

@@ -848,6 +848,7 @@ pub struct OrchestraValidateParams {
 #[cfg(test)]
 mod automation_protocol_tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     fn fixture_issue() -> AutomationIssue {
         AutomationIssue {
