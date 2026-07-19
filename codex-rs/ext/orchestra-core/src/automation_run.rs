@@ -3388,6 +3388,7 @@ mod tests {
     use crate::AutomationSecretReference;
     use crate::AutomationTrackerProfile;
     use crate::AutomationWorkspaceProfile;
+    use pretty_assertions::assert_eq;
     use serde_json::Value;
     use serde_json::json;
     use tempfile::tempdir;
